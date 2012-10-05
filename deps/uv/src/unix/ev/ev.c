@@ -608,9 +608,6 @@ ev_syserr (const char *msg)
 static void *
 ev_realloc_emul (void *ptr, long size)
 {
-#if __GLIBC__
-  return realloc (ptr, size);
-#else
   /* some systems, notably openbsd and darwin, fail to properly
    * implement realloc (x, 0) (as required by both ansi c-89 and
    * the single unix specification, so work around them here.
@@ -621,7 +618,6 @@ ev_realloc_emul (void *ptr, long size)
 
   free (ptr);
   return 0;
-#endif
 }
 
 static void *(*alloc)(void *ptr, long size) = ev_realloc_emul;
@@ -2538,6 +2534,14 @@ ev_run (EV_P_ int flags)
 #endif
 }
 
+/* libuv special */
+void
+ev__run (EV_P_ ev_tstamp waittime)
+{
+  fd_reify (EV_A);
+  backend_poll (EV_A_ waittime);
+}
+
 void
 ev_break (EV_P_ int how)
 {
@@ -3908,8 +3912,8 @@ ev_walk (EV_P_ int types, void (*cb)(EV_P_ int type, void *w))
           wl = wn;
         }
 #endif
-/* EV_STAT     0x00001000 /* stat data changed */
-/* EV_EMBED    0x00010000 /* embedded event loop needs sweep */
+/* EV_STAT     0x00001000 *//* stat data changed */
+/* EV_EMBED    0x00010000 *//* embedded event loop needs sweep */
 }
 #endif
 

@@ -80,7 +80,7 @@ Address RelocInfo::target_address_address() {
 
 
 int RelocInfo::target_address_size() {
-  return Assembler::kExternalTargetSize;
+  return kPointerSize;
 }
 
 
@@ -141,10 +141,7 @@ Handle<JSGlobalPropertyCell> RelocInfo::target_cell_handle() {
 
 JSGlobalPropertyCell* RelocInfo::target_cell() {
   ASSERT(rmode_ == RelocInfo::GLOBAL_PROPERTY_CELL);
-  Address address = Memory::Address_at(pc_);
-  Object* object = HeapObject::FromAddress(
-      address - JSGlobalPropertyCell::kValueOffset);
-  return reinterpret_cast<JSGlobalPropertyCell*>(object);
+  return JSGlobalPropertyCell::FromValueAddress(Memory::Address_at(pc_));
 }
 
 
@@ -364,8 +361,14 @@ Address Assembler::target_address_at(Address pc) {
 }
 
 
-void Assembler::set_target_at(Address constant_pool_entry,
-                              Address target) {
+void Assembler::deserialization_set_special_target_at(
+    Address constant_pool_entry, Address target) {
+  Memory::Address_at(constant_pool_entry) = target;
+}
+
+
+void Assembler::set_external_target_at(Address constant_pool_entry,
+                                       Address target) {
   Memory::Address_at(constant_pool_entry) = target;
 }
 

@@ -22,9 +22,7 @@
 #include "node.h"
 #include "node_file.h"
 #include "node_buffer.h"
-#ifdef __POSIX__
-# include "node_stat_watcher.h"
-#endif
+#include "node_stat_watcher.h"
 #include "req_wrap.h"
 
 #include <fcntl.h>
@@ -38,7 +36,6 @@
 #if defined(__MINGW32__) || defined(_MSC_VER)
 # include <io.h>
 #endif
-
 
 namespace node {
 
@@ -70,11 +67,20 @@ static Persistent<String> buf_symbol;
 static Persistent<String> oncomplete_sym;
 
 
-#ifdef _LARGEFILE_SOURCE
+#define ASSERT_OFFSET(a) \
+  if (!(a)->IsUndefined() && !(a)->IsNull() && !IsInt64((a)->NumberValue())) { \
+    return ThrowException(Exception::TypeError(String::New("Not an integer"))); \
+  }
+#define ASSERT_TRUNCATE_LENGTH(a) \
+  if (!(a)->IsUndefined() && !(a)->IsNull() && !IsInt64((a)->NumberValue())) { \
+    return ThrowException(Exception::TypeError(String::New("Not an integer"))); \
+  }
+#define GET_OFFSET(a) ((a)->IsNumber() ? (a)->IntegerValue() : -1)
+#define GET_TRUNCATE_LENGTH(a) ((a)->IntegerValue())
+
 static inline int IsInt64(double x) {
   return x == static_cast<double>(static_cast<int64_t>(x));
 }
-#endif
 
 
 static void After(uv_fs_t *req) {
@@ -82,9 +88,6 @@ static void After(uv_fs_t *req) {
 
   FSReqWrap* req_wrap = (FSReqWrap*) req->data;
   assert(&req_wrap->req_ == req);
-  Local<Value> callback_v = req_wrap->object_->Get(oncomplete_sym);
-  assert(callback_v->IsFunction());
-  Local<Function> callback = Local<Function>::Cast(callback_v);
 
   // there is always at least one argument. "error"
   int argc = 1;
@@ -153,10 +156,7 @@ static void After(uv_fs_t *req) {
       case UV_FS_STAT:
       case UV_FS_LSTAT:
       case UV_FS_FSTAT:
-        {
-          NODE_STAT_STRUCT *s = reinterpret_cast<NODE_STAT_STRUCT*>(req->ptr);
-          argv[1] = BuildStatsObject(s);
-        }
+        argv[1] = BuildStatsObject(static_cast<const uv_statbuf_t*>(req->ptr));
         break;
 
       case UV_FS_READLINK:
@@ -196,13 +196,10 @@ static void After(uv_fs_t *req) {
     }
   }
 
-  TryCatch try_catch;
-
-  callback->Call(req_wrap->object_, argc, argv);
-
-  if (try_catch.HasCaught()) {
-    FatalException(try_catch);
+  if (oncomplete_sym.IsEmpty()) {
+    oncomplete_sym = NODE_PSYMBOL("oncomplete");
   }
+  MakeCallback(req_wrap->object_, oncomplete_sym, argc, argv);
 
   uv_fs_req_cleanup(&req_wrap->req_);
   delete req_wrap;
@@ -282,7 +279,7 @@ static Persistent<String> atime_symbol;
 static Persistent<String> mtime_symbol;
 static Persistent<String> ctime_symbol;
 
-Local<Object> BuildStatsObject(NODE_STAT_STRUCT *s) {
+Local<Object> BuildStatsObject(const uv_statbuf_t* s) {
   HandleScope scope;
 
   if (dev_symbol.IsEmpty()) {
@@ -304,46 +301,59 @@ Local<Object> BuildStatsObject(NODE_STAT_STRUCT *s) {
   Local<Object> stats =
     stats_constructor_template->GetFunction()->NewInstance();
 
-  /* ID of device containing file */
-  stats->Set(dev_symbol, Integer::New(s->st_dev));
+  if (stats.IsEmpty()) return Local<Object>();
 
-  /* inode number */
-  stats->Set(ino_symbol, Integer::New(s->st_ino));
+  // The code below is very nasty-looking but it prevents a segmentation fault
+  // when people run JS code like the snippet below. It's apparently more
+  // common than you would expect, several people have reported this crash...
+  //
+  //   function crash() {
+  //     fs.statSync('.');
+  //     crash();
+  //   }
+  //
+  // We need to check the return value of Integer::New() and Date::New()
+  // and make sure that we bail out when V8 returns an empty handle.
+#define X(name)                                                               \
+  {                                                                           \
+    Local<Value> val = Integer::New(s->st_##name);                            \
+    if (val.IsEmpty()) return Local<Object>();                                \
+    stats->Set(name##_symbol, val);                                           \
+  }
+  X(dev)
+  X(mode)
+  X(nlink)
+  X(uid)
+  X(gid)
+  X(rdev)
+# if defined(__POSIX__)
+  X(blksize)
+# endif
+#undef X
 
-  /* protection */
-  stats->Set(mode_symbol, Integer::New(s->st_mode));
+#define X(name)                                                               \
+  {                                                                           \
+    Local<Value> val = Number::New(static_cast<double>(s->st_##name));        \
+    if (val.IsEmpty()) return Local<Object>();                                \
+    stats->Set(name##_symbol, val);                                           \
+  }
+  X(ino)
+  X(size)
+# if defined(__POSIX__)
+  X(blocks)
+# endif
+#undef X
 
-  /* number of hard links */
-  stats->Set(nlink_symbol, Integer::New(s->st_nlink));
-
-  /* user ID of owner */
-  stats->Set(uid_symbol, Integer::New(s->st_uid));
-
-  /* group ID of owner */
-  stats->Set(gid_symbol, Integer::New(s->st_gid));
-
-  /* device ID (if special file) */
-  stats->Set(rdev_symbol, Integer::New(s->st_rdev));
-
-  /* total size, in bytes */
-  stats->Set(size_symbol, Number::New(s->st_size));
-
-#ifdef __POSIX__
-  /* blocksize for filesystem I/O */
-  stats->Set(blksize_symbol, Integer::New(s->st_blksize));
-
-  /* number of blocks allocated */
-  stats->Set(blocks_symbol, Integer::New(s->st_blocks));
-#endif
-
-  /* time of last access */
-  stats->Set(atime_symbol, NODE_UNIXTIME_V8(s->st_atime));
-
-  /* time of last modification */
-  stats->Set(mtime_symbol, NODE_UNIXTIME_V8(s->st_mtime));
-
-  /* time of last status change */
-  stats->Set(ctime_symbol, NODE_UNIXTIME_V8(s->st_ctime));
+#define X(name)                                                               \
+  {                                                                           \
+    Local<Value> val = NODE_UNIXTIME_V8(s->st_##name);                        \
+    if (val.IsEmpty()) return Local<Object>();                                \
+    stats->Set(name##_symbol, val);                                           \
+  }
+  X(atime)
+  X(mtime)
+  X(ctime)
+#undef X
 
   return scope.Close(stats);
 }
@@ -354,13 +364,14 @@ static Handle<Value> Stat(const Arguments& args) {
   if (args.Length() < 1) return TYPE_ERROR("path required");
   if (!args[0]->IsString()) return TYPE_ERROR("path must be a string");
 
-  String::Utf8Value path(args[0]->ToString());
+  String::Utf8Value path(args[0]);
 
   if (args[1]->IsFunction()) {
     ASYNC_CALL(stat, args[1], *path)
   } else {
     SYNC_CALL(stat, *path, *path)
-    return scope.Close(BuildStatsObject((NODE_STAT_STRUCT*)SYNC_REQ.ptr));
+    return scope.Close(
+        BuildStatsObject(static_cast<const uv_statbuf_t*>(SYNC_REQ.ptr)));
   }
 }
 
@@ -370,13 +381,14 @@ static Handle<Value> LStat(const Arguments& args) {
   if (args.Length() < 1) return TYPE_ERROR("path required");
   if (!args[0]->IsString()) return TYPE_ERROR("path must be a string");
 
-  String::Utf8Value path(args[0]->ToString());
+  String::Utf8Value path(args[0]);
 
   if (args[1]->IsFunction()) {
     ASYNC_CALL(lstat, args[1], *path)
   } else {
     SYNC_CALL(lstat, *path, *path)
-    return scope.Close(BuildStatsObject((NODE_STAT_STRUCT*)SYNC_REQ.ptr));
+    return scope.Close(
+        BuildStatsObject(static_cast<const uv_statbuf_t*>(SYNC_REQ.ptr)));
   }
 }
 
@@ -393,7 +405,8 @@ static Handle<Value> FStat(const Arguments& args) {
     ASYNC_CALL(fstat, args[1], fd)
   } else {
     SYNC_CALL(fstat, 0, fd)
-    return scope.Close(BuildStatsObject((NODE_STAT_STRUCT*)SYNC_REQ.ptr));
+    return scope.Close(
+        BuildStatsObject(static_cast<const uv_statbuf_t*>(SYNC_REQ.ptr)));
   }
 }
 
@@ -406,14 +419,19 @@ static Handle<Value> Symlink(const Arguments& args) {
   if (!args[0]->IsString()) return TYPE_ERROR("dest path must be a string");
   if (!args[1]->IsString()) return TYPE_ERROR("src path must be a string");
 
-  String::Utf8Value dest(args[0]->ToString());
-  String::Utf8Value path(args[1]->ToString());
+  String::Utf8Value dest(args[0]);
+  String::Utf8Value path(args[1]);
   int flags = 0;
 
   if (args[2]->IsString()) {
-    String::Utf8Value mode(args[2]->ToString());
-    if (memcmp(*mode, "dir\0", 4) == 0) {
+    String::Utf8Value mode(args[2]);
+    if (strcmp(*mode, "dir") == 0) {
       flags |= UV_FS_SYMLINK_DIR;
+    } else if (strcmp(*mode, "junction") == 0) {
+      flags |= UV_FS_SYMLINK_JUNCTION;
+    } else if (strcmp(*mode, "file") != 0) {
+      return ThrowException(Exception::Error(
+        String::New("Unknown symlink type")));
     }
   }
 
@@ -434,8 +452,8 @@ static Handle<Value> Link(const Arguments& args) {
   if (!args[0]->IsString()) return TYPE_ERROR("dest path must be a string");
   if (!args[1]->IsString()) return TYPE_ERROR("src path must be a string");
 
-  String::Utf8Value orig_path(args[0]->ToString());
-  String::Utf8Value new_path(args[1]->ToString());
+  String::Utf8Value orig_path(args[0]);
+  String::Utf8Value new_path(args[1]);
 
   if (args[2]->IsFunction()) {
     ASYNC_CALL(link, args[2], *orig_path, *new_path)
@@ -451,7 +469,7 @@ static Handle<Value> ReadLink(const Arguments& args) {
   if (args.Length() < 1) return TYPE_ERROR("path required");
   if (!args[0]->IsString()) return TYPE_ERROR("path must be a string");
 
-  String::Utf8Value path(args[0]->ToString());
+  String::Utf8Value path(args[0]);
 
   if (args[1]->IsFunction()) {
     ASYNC_CALL(readlink, args[1], *path)
@@ -470,8 +488,8 @@ static Handle<Value> Rename(const Arguments& args) {
   if (!args[0]->IsString()) return TYPE_ERROR("old path must be a string");
   if (!args[1]->IsString()) return TYPE_ERROR("new path must be a string");
   
-  String::Utf8Value old_path(args[0]->ToString());
-  String::Utf8Value new_path(args[1]->ToString());
+  String::Utf8Value old_path(args[0]);
+  String::Utf8Value new_path(args[1]);
 
   if (args[2]->IsFunction()) {
     ASYNC_CALL(rename, args[2], *old_path, *new_path)
@@ -481,21 +499,7 @@ static Handle<Value> Rename(const Arguments& args) {
   }
 }
 
-#ifndef _LARGEFILE_SOURCE
-#define ASSERT_TRUNCATE_LENGTH(a) \
-  if (!(a)->IsUndefined() && !(a)->IsNull() && !(a)->IsUint32()) { \
-    return ThrowException(Exception::TypeError(String::New("Not an integer"))); \
-  }
-#define GET_TRUNCATE_LENGTH(a) ((a)->Uint32Value())
-#else
-#define ASSERT_TRUNCATE_LENGTH(a) \
-  if (!(a)->IsUndefined() && !(a)->IsNull() && !IsInt64((a)->NumberValue())) { \
-    return ThrowException(Exception::TypeError(String::New("Not an integer"))); \
-  }
-#define GET_TRUNCATE_LENGTH(a) ((a)->IntegerValue())
-#endif
-
-static Handle<Value> Truncate(const Arguments& args) {
+static Handle<Value> FTruncate(const Arguments& args) {
   HandleScope scope;
 
   if (args.Length() < 2 || !args[0]->IsInt32()) {
@@ -505,7 +509,7 @@ static Handle<Value> Truncate(const Arguments& args) {
   int fd = args[0]->Int32Value();
 
   ASSERT_TRUNCATE_LENGTH(args[1]);
-  off_t len = GET_TRUNCATE_LENGTH(args[1]);
+  int64_t len = GET_TRUNCATE_LENGTH(args[1]);
 
   if (args[2]->IsFunction()) {
     ASYNC_CALL(ftruncate, args[2], fd, len)
@@ -555,7 +559,7 @@ static Handle<Value> Unlink(const Arguments& args) {
   if (args.Length() < 1) return TYPE_ERROR("path required");
   if (!args[0]->IsString()) return TYPE_ERROR("path must be a string");
 
-  String::Utf8Value path(args[0]->ToString());
+  String::Utf8Value path(args[0]);
 
   if (args[1]->IsFunction()) {
     ASYNC_CALL(unlink, args[1], *path)
@@ -571,7 +575,7 @@ static Handle<Value> RMDir(const Arguments& args) {
   if (args.Length() < 1) return TYPE_ERROR("path required");
   if (!args[0]->IsString()) return TYPE_ERROR("path must be a string");
 
-  String::Utf8Value path(args[0]->ToString());
+  String::Utf8Value path(args[0]);
 
   if (args[1]->IsFunction()) {
     ASYNC_CALL(rmdir, args[1], *path)
@@ -588,7 +592,7 @@ static Handle<Value> MKDir(const Arguments& args) {
     return THROW_BAD_ARGS;
   }
 
-  String::Utf8Value path(args[0]->ToString());
+  String::Utf8Value path(args[0]);
   int mode = static_cast<int>(args[1]->Int32Value());
 
   if (args[2]->IsFunction()) {
@@ -629,7 +633,7 @@ static Handle<Value> ReadDir(const Arguments& args) {
   if (args.Length() < 1) return TYPE_ERROR("path required");
   if (!args[0]->IsString()) return TYPE_ERROR("path must be a string");
 
-  String::Utf8Value path(args[0]->ToString());
+  String::Utf8Value path(args[0]);
 
   if (args[1]->IsFunction()) {
     ASYNC_CALL(readdir, args[1], *path, 0 /*flags*/)
@@ -667,7 +671,7 @@ static Handle<Value> Open(const Arguments& args) {
   if (!args[1]->IsInt32()) return TYPE_ERROR("flags must be an int");
   if (!args[2]->IsInt32()) return TYPE_ERROR("mode must be an int");
 
-  String::Utf8Value path(args[0]->ToString());
+  String::Utf8Value path(args[0]);
   int flags = args[1]->Int32Value();
   int mode = static_cast<int>(args[2]->Int32Value());
 
@@ -679,20 +683,6 @@ static Handle<Value> Open(const Arguments& args) {
     return scope.Close(Integer::New(fd));
   }
 }
-
-#ifndef _LARGEFILE_SOURCE
-#define ASSERT_OFFSET(a) \
-  if (!(a)->IsUndefined() && !(a)->IsNull() && !(a)->IsInt32()) { \
-    return ThrowException(Exception::TypeError(String::New("Not an integer"))); \
-  }
-#define GET_OFFSET(a) ((a)->IsNumber() ? (a)->Int32Value() : -1)
-#else
-#define ASSERT_OFFSET(a) \
-  if (!(a)->IsUndefined() && !(a)->IsNull() && !IsInt64((a)->NumberValue())) { \
-    return ThrowException(Exception::TypeError(String::New("Not an integer"))); \
-  }
-#define GET_OFFSET(a) ((a)->IsNumber() ? (a)->IntegerValue() : -1)
-#endif
 
 // bytesWritten = write(fd, data, position, enc, callback)
 // Wrapper for write(2).
@@ -730,11 +720,11 @@ static Handle<Value> Write(const Arguments& args) {
   ssize_t len = args[3]->Int32Value();
   if (off + len > buffer_length) {
     return ThrowException(Exception::Error(
-          String::New("Length is extends beyond buffer")));
+          String::New("off + len > buffer.length")));
   }
 
   ASSERT_OFFSET(args[4]);
-  off_t pos = GET_OFFSET(args[4]);
+  int64_t pos = GET_OFFSET(args[4]);
 
   char * buf = (char*)buffer_data + off;
   Local<Value> cb = args[5];
@@ -771,7 +761,7 @@ static Handle<Value> Read(const Arguments& args) {
   Local<Value> cb;
 
   size_t len;
-  off_t pos;
+  int64_t pos;
 
   char * buf = NULL;
 
@@ -821,7 +811,7 @@ static Handle<Value> Chmod(const Arguments& args) {
   if(args.Length() < 2 || !args[0]->IsString() || !args[1]->IsInt32()) {
     return THROW_BAD_ARGS;
   }
-  String::Utf8Value path(args[0]->ToString());
+  String::Utf8Value path(args[0]);
   int mode = static_cast<int>(args[1]->Int32Value());
 
   if(args[2]->IsFunction()) {
@@ -868,7 +858,7 @@ static Handle<Value> Chown(const Arguments& args) {
   if (!args[1]->IsInt32()) return TYPE_ERROR("uid must be an int");
   if (!args[2]->IsInt32()) return TYPE_ERROR("gid must be an int");
 
-  String::Utf8Value path(args[0]->ToString());
+  String::Utf8Value path(args[0]);
   int uid = static_cast<int>(args[1]->Int32Value());
   int gid = static_cast<int>(args[2]->Int32Value());
 
@@ -919,7 +909,7 @@ static Handle<Value> UTimes(const Arguments& args) {
   if (!args[1]->IsNumber()) return TYPE_ERROR("atime must be a number");
   if (!args[2]->IsNumber()) return TYPE_ERROR("mtime must be a number");
 
-  const String::Utf8Value path(args[0]->ToString());
+  const String::Utf8Value path(args[0]);
   const double atime = static_cast<double>(args[1]->NumberValue());
   const double mtime = static_cast<double>(args[2]->NumberValue());
 
@@ -964,7 +954,7 @@ void File::Initialize(Handle<Object> target) {
   NODE_SET_METHOD(target, "fdatasync", Fdatasync);
   NODE_SET_METHOD(target, "fsync", Fsync);
   NODE_SET_METHOD(target, "rename", Rename);
-  NODE_SET_METHOD(target, "truncate", Truncate);
+  NODE_SET_METHOD(target, "ftruncate", FTruncate);
   NODE_SET_METHOD(target, "rmdir", RMDir);
   NODE_SET_METHOD(target, "mkdir", MKDir);
   NODE_SET_METHOD(target, "sendfile", SendFile);
@@ -1005,9 +995,7 @@ void InitFs(Handle<Object> target) {
 
   oncomplete_sym = NODE_PSYMBOL("oncomplete");
 
-#ifdef __POSIX__
   StatWatcher::Initialize(target);
-#endif
 }
 
 }  // end namespace node

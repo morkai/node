@@ -86,6 +86,15 @@ class Ticker;
       logger->Call;                                 \
   } while (false)
 
+#define LOG_CODE_EVENT(isolate, Call)               \
+  do {                                              \
+    v8::internal::Logger* logger =                  \
+        (isolate)->logger();                        \
+    if (logger->is_logging_code_events())           \
+      logger->Call;                                 \
+  } while (false)
+
+
 #define LOG_EVENTS_AND_TAGS_LIST(V)                                     \
   V(CODE_CREATION_EVENT,            "code-creation")                    \
   V(CODE_MOVE_EVENT,                "code-move")                        \
@@ -150,6 +159,10 @@ class Logger {
 
   // Acquires resources for logging if the right flags are set.
   bool SetUp();
+
+  // Sets the current code event handler.
+  void SetCodeEventHandler(uint32_t options,
+                           JitCodeEventHandler event_handler);
 
   void EnsureTickerStarted();
   void EnsureTickerStopped();
@@ -274,6 +287,10 @@ class Logger {
     return logging_nesting_ > 0;
   }
 
+  bool is_logging_code_events() {
+    return is_logging() || code_event_handler_ != NULL;
+  }
+
   // Pause/Resume collection of profiling data.
   // When data collection is paused, CPU Tick events are discarded until
   // data collection is Resumed.
@@ -311,6 +328,11 @@ class Logger {
 
   Logger();
   ~Logger();
+
+  // Issue code notifications.
+  void IssueCodeAddedEvent(Code* code, const char* name, size_t name_len);
+  void IssueCodeMovedEvent(Address from, Address to);
+  void IssueCodeRemovedEvent(Address from);
 
   // Emits the profiler's first message.
   void ProfilerBeginEvent();
@@ -413,6 +435,9 @@ class Logger {
   // 'true' between SetUp() and TearDown().
   bool is_initialized_;
 
+  // The code event handler - if any.
+  JitCodeEventHandler code_event_handler_;
+
   // Support for 'incremental addresses' in compressed logs:
   //  LogMessageBuilder::AppendAddress(Address addr)
   Address last_address_;
@@ -437,6 +462,8 @@ class SamplerRegistry : public AllStatic {
     HAS_CPU_PROFILING_SAMPLERS
   };
 
+  static void SetUp();
+
   typedef void (*VisitSampler)(Sampler*, void*);
 
   static State GetState();
@@ -454,7 +481,6 @@ class SamplerRegistry : public AllStatic {
     return active_samplers_ != NULL && !active_samplers_->is_empty();
   }
 
-  static Mutex* mutex_;  // Protects the state below.
   static List<Sampler*>* active_samplers_;
 
   DISALLOW_IMPLICIT_CONSTRUCTORS(SamplerRegistry);

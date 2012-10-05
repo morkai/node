@@ -40,7 +40,7 @@ class CompilationInfo;
 // A hash map to support fast variable declaration and lookup.
 class VariableMap: public ZoneHashMap {
  public:
-  VariableMap();
+  explicit VariableMap(Zone* zone);
 
   virtual ~VariableMap();
 
@@ -49,9 +49,15 @@ class VariableMap: public ZoneHashMap {
                     VariableMode mode,
                     bool is_valid_lhs,
                     Variable::Kind kind,
-                    InitializationFlag initialization_flag);
+                    InitializationFlag initialization_flag,
+                    Interface* interface = Interface::NewValue());
 
   Variable* Lookup(Handle<String> name);
+
+  Zone* zone() const { return zone_; }
+
+ private:
+  Zone* zone_;
 };
 
 
@@ -61,14 +67,19 @@ class VariableMap: public ZoneHashMap {
 // and setup time for scopes that don't need them.
 class DynamicScopePart : public ZoneObject {
  public:
+  explicit DynamicScopePart(Zone* zone) {
+    for (int i = 0; i < 3; i++)
+      maps_[i] = new(zone->New(sizeof(VariableMap))) VariableMap(zone);
+  }
+
   VariableMap* GetMap(VariableMode mode) {
     int index = mode - DYNAMIC;
     ASSERT(index >= 0 && index < 3);
-    return &maps_[index];
+    return maps_[index];
   }
 
  private:
-  VariableMap maps_[3];
+  VariableMap *maps_[3];
 };
 
 
@@ -86,14 +97,15 @@ class Scope: public ZoneObject {
   // ---------------------------------------------------------------------------
   // Construction
 
-  Scope(Scope* outer_scope, ScopeType type);
+  Scope(Scope* outer_scope, ScopeType type, Zone* zone);
 
   // Compute top scope and allocate variables. For lazy compilation the top
   // scope only contains the single lazily compiled function, so this
   // doesn't re-allocate variables repeatedly.
   static bool Analyze(CompilationInfo* info);
 
-  static Scope* DeserializeScopeChain(Context* context, Scope* global_scope);
+  static Scope* DeserializeScopeChain(Context* context, Scope* global_scope,
+                                      Zone* zone);
 
   // The scope name is only used for printing/debugging.
   void SetScopeName(Handle<String> scope_name) { scope_name_ = scope_name; }
@@ -104,6 +116,8 @@ class Scope: public ZoneObject {
   // block scoped declarations. In that case it is removed from the scope
   // tree and its children are reparented.
   Scope* FinalizeBlockScope();
+
+  Zone* zone() const { return zone_; }
 
   // ---------------------------------------------------------------------------
   // Declarations
@@ -125,15 +139,9 @@ class Scope: public ZoneObject {
   // Declare the function variable for a function literal. This variable
   // is in an intermediate scope between this function scope and the the
   // outer scope. Only possible for function scopes; at most one variable.
-  template<class Visitor>
-  Variable* DeclareFunctionVar(Handle<String> name,
-                               VariableMode mode,
-                               AstNodeFactory<Visitor>* factory) {
-    ASSERT(is_function_scope() && function_ == NULL);
-    Variable* function_var = new Variable(
-        this, name, mode, true, Variable::NORMAL, kCreatedInitialized);
-    function_ = factory->NewVariableProxy(function_var);
-    return function_var;
+  void DeclareFunctionVar(VariableDeclaration* declaration) {
+    ASSERT(is_function_scope());
+    function_ = declaration;
   }
 
   // Declare a parameter in this scope.  When there are duplicated
@@ -145,25 +153,28 @@ class Scope: public ZoneObject {
   // declared before, the previously declared variable is returned.
   Variable* DeclareLocal(Handle<String> name,
                          VariableMode mode,
-                         InitializationFlag init_flag);
+                         InitializationFlag init_flag,
+                         Interface* interface = Interface::NewValue());
 
   // Declare an implicit global variable in this scope which must be a
   // global scope.  The variable was introduced (possibly from an inner
   // scope) by a reference to an unresolved variable with no intervening
   // with statements or eval calls.
-  Variable* DeclareGlobal(Handle<String> name);
+  Variable* DeclareDynamicGlobal(Handle<String> name);
 
   // Create a new unresolved variable.
   template<class Visitor>
   VariableProxy* NewUnresolved(AstNodeFactory<Visitor>* factory,
                                Handle<String> name,
+                               Interface* interface = Interface::NewValue(),
                                int position = RelocInfo::kNoPosition) {
     // Note that we must not share the unresolved variables with
     // the same name because they may be removed selectively via
     // RemoveUnresolved().
     ASSERT(!already_resolved());
-    VariableProxy* proxy = factory->NewVariableProxy(name, false, position);
-    unresolved_.Add(proxy);
+    VariableProxy* proxy =
+        factory->NewVariableProxy(name, false, interface, position);
+    unresolved_.Add(proxy, zone_);
     return proxy;
   }
 
@@ -269,7 +280,8 @@ class Scope: public ZoneObject {
   bool is_block_scope() const { return type_ == BLOCK_SCOPE; }
   bool is_with_scope() const { return type_ == WITH_SCOPE; }
   bool is_declaration_scope() const {
-    return is_eval_scope() || is_function_scope() || is_global_scope();
+    return is_eval_scope() || is_function_scope() ||
+        is_module_scope() || is_global_scope();
   }
   bool is_classic_mode() const {
     return language_mode() == CLASSIC_MODE;
@@ -295,9 +307,6 @@ class Scope: public ZoneObject {
   // Does this scope contain a with statement.
   bool contains_with() const { return scope_contains_with_; }
 
-  // The scope immediately surrounding this scope, or NULL.
-  Scope* outer_scope() const { return outer_scope_; }
-
   // ---------------------------------------------------------------------------
   // Accessors.
 
@@ -311,9 +320,8 @@ class Scope: public ZoneObject {
   Variable* receiver() { return receiver_; }
 
   // The variable holding the function literal for named function
-  // literals, or NULL.
-  // Only valid for function scopes.
-  VariableProxy* function() const {
+  // literals, or NULL.  Only valid for function scopes.
+  VariableDeclaration* function() const {
     ASSERT(is_function_scope());
     return function_;
   }
@@ -336,6 +344,12 @@ class Scope: public ZoneObject {
   // Inner scope list.
   ZoneList<Scope*>* inner_scopes() { return &inner_scopes_; }
 
+  // The scope immediately surrounding this scope, or NULL.
+  Scope* outer_scope() const { return outer_scope_; }
+
+  // The interface as inferred so far; only for module scopes.
+  Interface* interface() const { return interface_; }
+
   // ---------------------------------------------------------------------------
   // Variable allocation.
 
@@ -344,17 +358,6 @@ class Scope: public ZoneObject {
   // handled separately.
   void CollectStackAndContextLocals(ZoneList<Variable*>* stack_locals,
                                     ZoneList<Variable*>* context_locals);
-
-  // Resolve and fill in the allocation information for all variables
-  // in this scopes. Must be called *after* all scopes have been
-  // processed (parsed) to ensure that unresolved variables can be
-  // resolved properly.
-  //
-  // In the case of code compiled and run using 'eval', the context
-  // parameter is the context in which eval was called.  In all other
-  // cases the context parameter is an empty handle.
-  void AllocateVariables(Scope* global_scope,
-                         AstNodeFactory<AstNullVisitor>* factory);
 
   // Current number of var or const locals.
   int num_var_or_const() { return num_var_or_const_; }
@@ -372,8 +375,14 @@ class Scope: public ZoneObject {
   // Determine if we can use lazy compilation for this scope.
   bool AllowsLazyCompilation() const;
 
-  // True if the outer context of this scope is always the global context.
+  // Determine if we can use lazy compilation for this scope without a context.
+  bool AllowsLazyCompilationWithoutContext() const;
+
+  // True if the outer context of this scope is always the native context.
   bool HasTrivialOuterContext() const;
+
+  // True if the outer context allows lazy compilation of this scope.
+  bool HasLazyCompilableOuterContext() const;
 
   // The number of contexts between this and scope; zero if this == scope.
   int ContextChainLength(Scope* scope);
@@ -445,9 +454,11 @@ class Scope: public ZoneObject {
   // Convenience variable.
   Variable* receiver_;
   // Function variable, if any; function scopes only.
-  VariableProxy* function_;
+  VariableDeclaration* function_;
   // Convenience variable; function scopes only.
   Variable* arguments_;
+  // Interface; module scopes only.
+  Interface* interface_;
 
   // Illegal redeclaration.
   Expression* illegal_redecl_;
@@ -543,10 +554,12 @@ class Scope: public ZoneObject {
   Variable* LookupRecursive(Handle<String> name,
                             BindingKind* binding_kind,
                             AstNodeFactory<AstNullVisitor>* factory);
-  void ResolveVariable(Scope* global_scope,
+  MUST_USE_RESULT
+  bool ResolveVariable(CompilationInfo* info,
                        VariableProxy* proxy,
                        AstNodeFactory<AstNullVisitor>* factory);
-  void ResolveVariablesRecursively(Scope* global_scope,
+  MUST_USE_RESULT
+  bool ResolveVariablesRecursively(CompilationInfo* info,
                                    AstNodeFactory<AstNullVisitor>* factory);
 
   // Scope analysis.
@@ -566,16 +579,36 @@ class Scope: public ZoneObject {
   void AllocateNonParameterLocals();
   void AllocateVariablesRecursively();
 
+  // Resolve and fill in the allocation information for all variables
+  // in this scopes. Must be called *after* all scopes have been
+  // processed (parsed) to ensure that unresolved variables can be
+  // resolved properly.
+  //
+  // In the case of code compiled and run using 'eval', the context
+  // parameter is the context in which eval was called.  In all other
+  // cases the context parameter is an empty handle.
+  MUST_USE_RESULT
+  bool AllocateVariables(CompilationInfo* info,
+                         AstNodeFactory<AstNullVisitor>* factory);
+
+  // Instance objects have to be created ahead of time (before code generation)
+  // because of potentially cyclic references between them.
+  // Linking also has to be a separate stage, since populating one object may
+  // potentially require (forward) references to others.
+  void AllocateModules(CompilationInfo* info);
+  void LinkModules(CompilationInfo* info);
+
  private:
   // Construct a scope based on the scope info.
-  Scope(Scope* inner_scope, ScopeType type, Handle<ScopeInfo> scope_info);
+  Scope(Scope* inner_scope, ScopeType type, Handle<ScopeInfo> scope_info,
+        Zone* zone);
 
   // Construct a catch scope with a binding for the name.
-  Scope(Scope* inner_scope, Handle<String> catch_variable_name);
+  Scope(Scope* inner_scope, Handle<String> catch_variable_name, Zone* zone);
 
   void AddInnerScope(Scope* inner_scope) {
     if (inner_scope != NULL) {
-      inner_scopes_.Add(inner_scope);
+      inner_scopes_.Add(inner_scope, zone_);
       inner_scope->outer_scope_ = this;
     }
   }
@@ -583,6 +616,8 @@ class Scope: public ZoneObject {
   void SetDefaults(ScopeType type,
                    Scope* outer_scope,
                    Handle<ScopeInfo> scope_info);
+
+  Zone* zone_;
 };
 
 } }  // namespace v8::internal

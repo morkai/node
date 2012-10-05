@@ -37,16 +37,25 @@
 #include <unistd.h>
 
 #undef NANOSEC
-#define NANOSEC 1000000000
+#define NANOSEC ((uint64_t) 1e9)
 
 
 static char *process_title;
 
 
+int uv__platform_loop_init(uv_loop_t* loop, int default_loop) {
+  return 0;
+}
+
+
+void uv__platform_loop_delete(uv_loop_t* loop) {
+}
+
+
 uint64_t uv_hrtime(void) {
   struct timespec ts;
   clock_gettime(CLOCK_MONOTONIC, &ts);
-  return (ts.tv_sec * NANOSEC + ts.tv_nsec);
+  return (((uint64_t) ts.tv_sec) * NANOSEC + ts.tv_nsec);
 }
 
 
@@ -216,6 +225,7 @@ uv_err_t uv_cpu_info(uv_cpu_info_t** cpu_infos, int* count) {
   int numcpus = 1;
   static int which[] = {CTL_HW,HW_MODEL,0};
   size_t size;
+  int i;
   uv_cpu_info_t* cpu_info;
 
   size = sizeof(model);
@@ -245,7 +255,7 @@ uv_err_t uv_cpu_info(uv_cpu_info_t** cpu_infos, int* count) {
   size = sizeof(info);
   which[0] = CTL_KERN;
   which[1] = KERN_CPTIME2;
-  for (int i = 0; i < numcpus; i++) {
+  for (i = 0; i < numcpus; i++) {
     which[2] = i;
     size = sizeof(info);
     if (sysctl(which, 3, &info, &size, NULL, 0) < 0) {

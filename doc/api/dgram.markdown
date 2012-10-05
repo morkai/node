@@ -144,7 +144,7 @@ Close the underlying socket and stop listening for data on it.
 ### dgram.address()
 
 Returns an object containing the address information for a socket.  For UDP sockets,
-this object will contain `address` and `port`.
+this object will contain `address` , `family` and `port`.
 
 ### dgram.setBroadcast(flag)
 
@@ -176,7 +176,7 @@ specifically for multicast traffic.  Each router or gateway that forwards a pack
 decrements the TTL. If the TTL is decremented to 0 by a router, it will not be forwarded.
 
 The argument to `setMulticastTTL()` is a number of hops between 0 and 255.  The default on most
-systems is 64.
+systems is 1.
 
 ### dgram.setMulticastLoopback(flag)
 
@@ -207,3 +207,15 @@ this.
 
 If `multicastInterface` is not specified, the OS will try to drop membership to all valid
 interfaces.
+
+### dgram.unref()
+
+Calling `unref` on a socket will allow the program to exit if this is the only
+active socket in the event system. If the socket is already `unref`d calling
+`unref` again will have no effect.
+
+### dgram.ref()
+
+Opposite of `unref`, calling `ref` on a previously `unref`d socket will *not*
+let the program exit if it's the only socket left (the default behavior). If
+the socket is `ref`d calling `ref` again will have no effect.

@@ -56,7 +56,6 @@ enum BuiltinExtraArguments {
   V(ArrayConcat, NO_EXTRA_ARGUMENTS)                                \
                                                                     \
   V(HandleApiCall, NEEDS_CALLED_FUNCTION)                           \
-  V(FastHandleApiCall, NO_EXTRA_ARGUMENTS)                          \
   V(HandleApiCallConstruct, NEEDS_CALLED_FUNCTION)                  \
   V(HandleApiCallAsFunction, NO_EXTRA_ARGUMENTS)                    \
   V(HandleApiCallAsConstructor, NO_EXTRA_ARGUMENTS)                 \
@@ -66,6 +65,8 @@ enum BuiltinExtraArguments {
 // Define list of builtins implemented in assembly.
 #define BUILTIN_LIST_A(V)                                               \
   V(ArgumentsAdaptorTrampoline,     BUILTIN, UNINITIALIZED,             \
+                                    Code::kNoExtraICState)              \
+  V(InRecompileQueue,               BUILTIN, UNINITIALIZED,             \
                                     Code::kNoExtraICState)              \
   V(JSConstructStubCountdown,       BUILTIN, UNINITIALIZED,             \
                                     Code::kNoExtraICState)              \
@@ -80,6 +81,8 @@ enum BuiltinExtraArguments {
   V(LazyCompile,                    BUILTIN, UNINITIALIZED,             \
                                     Code::kNoExtraICState)              \
   V(LazyRecompile,                  BUILTIN, UNINITIALIZED,             \
+                                    Code::kNoExtraICState)              \
+  V(ParallelRecompile,              BUILTIN, UNINITIALIZED,             \
                                     Code::kNoExtraICState)              \
   V(NotifyDeoptimized,              BUILTIN, UNINITIALIZED,             \
                                     Code::kNoExtraICState)              \
@@ -120,6 +123,8 @@ enum BuiltinExtraArguments {
                                     Code::kNoExtraICState)              \
   V(LoadIC_Megamorphic,             LOAD_IC, MEGAMORPHIC,               \
                                     Code::kNoExtraICState)              \
+  V(LoadIC_Getter_ForDeopt,         LOAD_IC, MONOMORPHIC,               \
+                                    Code::kNoExtraICState)              \
                                                                         \
   V(KeyedLoadIC_Initialize,         KEYED_LOAD_IC, UNINITIALIZED,       \
                                     Code::kNoExtraICState)              \
@@ -153,6 +158,8 @@ enum BuiltinExtraArguments {
   V(StoreIC_Megamorphic_Strict,     STORE_IC, MEGAMORPHIC,              \
                                     kStrictMode)                        \
   V(StoreIC_GlobalProxy_Strict,     STORE_IC, MEGAMORPHIC,              \
+                                    kStrictMode)                        \
+  V(StoreIC_Setter_ForDeopt,        STORE_IC, MONOMORPHIC,              \
                                     kStrictMode)                        \
                                                                         \
   V(KeyedStoreIC_Initialize,        KEYED_STORE_IC, UNINITIALIZED,      \
@@ -348,6 +355,8 @@ class Builtins {
   static void Generate_Adaptor(MacroAssembler* masm,
                                CFunctionId id,
                                BuiltinExtraArguments extra_args);
+  static void Generate_InRecompileQueue(MacroAssembler* masm);
+  static void Generate_ParallelRecompile(MacroAssembler* masm);
   static void Generate_JSConstructStubCountdown(MacroAssembler* masm);
   static void Generate_JSConstructStubGeneric(MacroAssembler* masm);
   static void Generate_JSConstructStubApi(MacroAssembler* masm);

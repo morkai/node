@@ -75,12 +75,13 @@ void Builtins::Generate_Adaptor(MacroAssembler* masm,
 // Load the built-in InternalArray function from the current context.
 static void GenerateLoadInternalArrayFunction(MacroAssembler* masm,
                                               Register result) {
-  // Load the global context.
+  // Load the native context.
 
-  __ ldr(result, MemOperand(cp, Context::SlotOffset(Context::GLOBAL_INDEX)));
   __ ldr(result,
-         FieldMemOperand(result, GlobalObject::kGlobalContextOffset));
-  // Load the InternalArray function from the global context.
+         MemOperand(cp, Context::SlotOffset(Context::GLOBAL_OBJECT_INDEX)));
+  __ ldr(result,
+         FieldMemOperand(result, GlobalObject::kNativeContextOffset));
+  // Load the InternalArray function from the native context.
   __ ldr(result,
          MemOperand(result,
                     Context::SlotOffset(
@@ -90,12 +91,13 @@ static void GenerateLoadInternalArrayFunction(MacroAssembler* masm,
 
 // Load the built-in Array function from the current context.
 static void GenerateLoadArrayFunction(MacroAssembler* masm, Register result) {
-  // Load the global context.
+  // Load the native context.
 
-  __ ldr(result, MemOperand(cp, Context::SlotOffset(Context::GLOBAL_INDEX)));
   __ ldr(result,
-         FieldMemOperand(result, GlobalObject::kGlobalContextOffset));
-  // Load the Array function from the global context.
+         MemOperand(cp, Context::SlotOffset(Context::GLOBAL_OBJECT_INDEX)));
+  __ ldr(result,
+         FieldMemOperand(result, GlobalObject::kNativeContextOffset));
+  // Load the Array function from the native context.
   __ ldr(result,
          MemOperand(result,
                     Context::SlotOffset(Context::ARRAY_FUNCTION_INDEX)));
@@ -114,7 +116,7 @@ static void AllocateEmptyJSArray(MacroAssembler* masm,
                                  Label* gc_required) {
   const int initial_capacity = JSArray::kPreallocatedArrayElements;
   STATIC_ASSERT(initial_capacity >= 0);
-  __ LoadInitialArrayMap(array_function, scratch2, scratch1);
+  __ LoadInitialArrayMap(array_function, scratch2, scratch1, false);
 
   // Allocate the JSArray object together with space for a fixed array with the
   // requested elements.
@@ -208,7 +210,8 @@ static void AllocateJSArray(MacroAssembler* masm,
                             bool fill_with_hole,
                             Label* gc_required) {
   // Load the initial map from the array function.
-  __ LoadInitialArrayMap(array_function, scratch2, elements_array_storage);
+  __ LoadInitialArrayMap(array_function, scratch2,
+                         elements_array_storage, fill_with_hole);
 
   if (FLAG_debug_code) {  // Assert that array size is not zero.
     __ tst(array_size, array_size);
@@ -440,10 +443,10 @@ static void ArrayNativeCode(MacroAssembler* masm,
   __ b(call_generic_code);
 
   __ bind(&not_double);
-  // Transition FAST_SMI_ONLY_ELEMENTS to FAST_ELEMENTS.
+  // Transition FAST_SMI_ELEMENTS to FAST_ELEMENTS.
   // r3: JSArray
   __ ldr(r2, FieldMemOperand(r3, HeapObject::kMapOffset));
-  __ LoadTransitionedArrayMapConditional(FAST_SMI_ONLY_ELEMENTS,
+  __ LoadTransitionedArrayMapConditional(FAST_SMI_ELEMENTS,
                                          FAST_ELEMENTS,
                                          r2,
                                          r9,
@@ -693,6 +696,43 @@ void Builtins::Generate_StringConstructCode(MacroAssembler* masm) {
     __ CallRuntime(Runtime::kNewStringWrapper, 1);
   }
   __ Ret();
+}
+
+
+static void GenerateTailCallToSharedCode(MacroAssembler* masm) {
+  __ ldr(r2, FieldMemOperand(r1, JSFunction::kSharedFunctionInfoOffset));
+  __ ldr(r2, FieldMemOperand(r2, SharedFunctionInfo::kCodeOffset));
+  __ add(r2, r2, Operand(Code::kHeaderSize - kHeapObjectTag));
+  __ mov(pc, r2);
+}
+
+
+void Builtins::Generate_InRecompileQueue(MacroAssembler* masm) {
+  GenerateTailCallToSharedCode(masm);
+}
+
+
+void Builtins::Generate_ParallelRecompile(MacroAssembler* masm) {
+  {
+    FrameScope scope(masm, StackFrame::INTERNAL);
+
+    // Push a copy of the function onto the stack.
+    __ push(r1);
+    // Push call kind information.
+    __ push(r5);
+
+    __ push(r1);  // Function is also the parameter to the runtime call.
+    __ CallRuntime(Runtime::kParallelRecompile, 1);
+
+    // Restore call kind information.
+    __ pop(r5);
+    // Restore receiver.
+    __ pop(r1);
+
+    // Tear down internal frame.
+  }
+
+  GenerateTailCallToSharedCode(masm);
 }
 
 
@@ -978,6 +1018,11 @@ static void Generate_JSConstructStubHelper(MacroAssembler* masm,
                         NullCallWrapper(), CALL_AS_METHOD);
     }
 
+    // Store offset of return address for deoptimizer.
+    if (!is_api_function && !count_constructions) {
+      masm->isolate()->heap()->SetConstructStubDeoptPCOffset(masm->pc_offset());
+    }
+
     // Restore context from the frame.
     // r0: result
     // sp[0]: receiver
@@ -1240,7 +1285,7 @@ void Builtins::Generate_NotifyOSR(MacroAssembler* masm) {
 
 void Builtins::Generate_OnStackReplacement(MacroAssembler* masm) {
   CpuFeatures::TryForceFeatureScope scope(VFP3);
-  if (!CpuFeatures::IsSupported(VFP3)) {
+  if (!CPU::SupportsCrankshaft()) {
     __ Abort("Unreachable code: Cannot optimize without VFP3 support.");
     return;
   }
@@ -1360,9 +1405,9 @@ void Builtins::Generate_FunctionCall(MacroAssembler* masm) {
     // receiver.
     __ bind(&use_global_receiver);
     const int kGlobalIndex =
-        Context::kHeaderSize + Context::GLOBAL_INDEX * kPointerSize;
+        Context::kHeaderSize + Context::GLOBAL_OBJECT_INDEX * kPointerSize;
     __ ldr(r2, FieldMemOperand(cp, kGlobalIndex));
-    __ ldr(r2, FieldMemOperand(r2, GlobalObject::kGlobalContextOffset));
+    __ ldr(r2, FieldMemOperand(r2, GlobalObject::kNativeContextOffset));
     __ ldr(r2, FieldMemOperand(r2, kGlobalIndex));
     __ ldr(r2, FieldMemOperand(r2, GlobalObject::kGlobalReceiverOffset));
 
@@ -1555,9 +1600,9 @@ void Builtins::Generate_FunctionApply(MacroAssembler* masm) {
     // Use the current global receiver object as the receiver.
     __ bind(&use_global_receiver);
     const int kGlobalOffset =
-        Context::kHeaderSize + Context::GLOBAL_INDEX * kPointerSize;
+        Context::kHeaderSize + Context::GLOBAL_OBJECT_INDEX * kPointerSize;
     __ ldr(r0, FieldMemOperand(cp, kGlobalOffset));
-    __ ldr(r0, FieldMemOperand(r0, GlobalObject::kGlobalContextOffset));
+    __ ldr(r0, FieldMemOperand(r0, GlobalObject::kNativeContextOffset));
     __ ldr(r0, FieldMemOperand(r0, kGlobalOffset));
     __ ldr(r0, FieldMemOperand(r0, GlobalObject::kGlobalReceiverOffset));
 
@@ -1740,7 +1785,9 @@ void Builtins::Generate_ArgumentsAdaptorTrampoline(MacroAssembler* masm) {
   __ bind(&invoke);
   __ Call(r3);
 
+  // Store offset of return address for deoptimizer.
   masm->isolate()->heap()->SetArgumentsAdaptorDeoptPCOffset(masm->pc_offset());
+
   // Exit frame and return.
   LeaveArgumentsAdaptorFrame(masm);
   __ Jump(lr);

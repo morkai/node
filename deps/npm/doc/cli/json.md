@@ -23,6 +23,11 @@ npm will default some values based on package contents.
   If there is a `wscript` file in the root of your package, npm will
   default the `preinstall` command to compile using node-waf.
 
+* `"scripts":{"preinstall": "node-gyp rebuild"}`
+
+  If there is a `binding.gyp` file in the root of your package, npm will
+  default the `preinstall` command to compile using node-gyp.
+
 * `"contributors": [...]`
 
   If there is an `AUTHORS` file in the root of your package, npm will
@@ -394,6 +399,7 @@ Git urls can be of the form:
 
     git://github.com/user/project.git#commit-ish
     git+ssh://user@hostname:project.git#commit-ish
+    git+ssh://user@hostname/project.git#commit-ish
     git+http://user@hostname/project/blah.git#commit-ish
     git+https://user@hostname/project/blah.git#commit-ish
 
@@ -420,15 +426,44 @@ Array of package names that will be bundled when publishing the package.
 
 If this is spelled `"bundleDependencies"`, then that is also honorable.
 
+## optionalDependencies
+
+If a dependency can be used, but you would like npm to proceed if it
+cannot be found or fails to install, then you may put it in the
+`optionalDependencies` hash.  This is a map of package name to version
+or url, just like the `dependencies` hash.  The difference is that
+failure is tolerated.
+
+It is still your program's responsibility to handle the lack of the
+dependency.  For example, something like this:
+
+    try {
+      var foo = require('foo')
+      var fooVersion = require('foo/package.json').version
+    } catch (er) {
+      foo = null
+    }
+    if ( notGoodFooVersion(fooVersion) ) {
+      foo = null
+    }
+
+    // .. then later in your program ..
+
+    if (foo) {
+      foo.doFooThings()
+    }
+
+Entries in `optionalDependencies` will override entries of the same name in
+`dependencies`, so it's usually best to only put in one place.
+
 ## engines
 
-You can specify the version of
-node that your stuff works on:
+You can specify the version of node that your stuff works on:
 
     { "engines" : { "node" : ">=0.1.27 <0.1.30" } }
 
 And, like with dependencies, if you don't specify the version (or if you
-specify "*" as the version), then any version of node will do.
+specify "\*" as the version), then any version of node will do.
 
 If you specify an "engines" field, then npm will require that "node" be
 somewhere on that list. If "engines" is omitted, then npm will just assume
@@ -438,6 +473,52 @@ You can also use the "engines" field to specify which versions of npm
 are capable of properly installing your program.  For example:
 
     { "engines" : { "npm" : "~1.0.20" } }
+
+Note that, unless the user has set the `engine-strict` config flag, this
+field is advisory only.
+
+## engineStrict
+
+If you are sure that your module will *definitely not* run properly on
+versions of Node/npm other than those specified in the `engines` hash,
+then you can set `"engineStrict": true` in your package.json file.
+This will override the user's `engine-strict` config setting.
+
+Please do not do this unless you are really very very sure.  If your
+engines hash is something overly restrictive, you can quite easily and
+inadvertently lock yourself into obscurity and prevent your users from
+updating to new versions of Node.  Consider this choice carefully.  If
+people abuse it, it will be removed in a future version of npm.
+
+## os
+
+You can specify which operating systems your
+module will run on:
+
+    "os" : [ "darwin", "linux" ]
+
+You can also blacklist instead of whitelist operating systems,
+just prepend the blacklisted os with a '!':
+
+    "os" : [ "!win32" ]
+
+The host operating system is determined by `process.platform`
+
+It is allowed to both blacklist, and whitelist, although there isn't any
+good reason to do this.
+
+## cpu
+
+If your code only runs on certain cpu architectures,
+you can specify which ones.
+
+    "cpu" : [ "x64", "ia32" ]
+
+Like the `os` option, you can also blacklist architectures:
+
+    "cpu" : [ "!arm", "!mips" ]
+
+The host architecture is determined by `process.arch`
 
 ## preferGlobal
 
@@ -455,7 +536,7 @@ to publish it.
 
 This is a way to prevent accidental publication of private repositories.
 If you would like to ensure that a given package is only ever published
-to a speciic registry (for example, an internal registry),
+to a specific registry (for example, an internal registry),
 then use the `publishConfig` hash described below
 to override the `registry` config param at publish-time.
 

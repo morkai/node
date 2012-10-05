@@ -29,6 +29,7 @@
 #define V8_SPACES_H_
 
 #include "allocation.h"
+#include "hashmap.h"
 #include "list.h"
 #include "log.h"
 
@@ -506,6 +507,11 @@ class MemoryChunk {
     size_ = size;
   }
 
+  void SetArea(Address area_start, Address area_end) {
+    area_start_ = area_start;
+    area_end_ = area_end;
+  }
+
   Executability executable() {
     return IsFlagSet(IS_EXECUTABLE) ? EXECUTABLE : NOT_EXECUTABLE;
   }
@@ -631,7 +637,9 @@ class MemoryChunk {
   friend class MemoryAllocator;
 };
 
+
 STATIC_CHECK(sizeof(MemoryChunk) <= MemoryChunk::kHeaderSize);
+
 
 // -----------------------------------------------------------------------------
 // A page is a memory chunk of a size 1MB. Large object pages may be larger.
@@ -944,11 +952,11 @@ class MemoryAllocator {
 
   void TearDown();
 
-  Page* AllocatePage(PagedSpace* owner, Executability executable);
+  Page* AllocatePage(
+      intptr_t size, PagedSpace* owner, Executability executable);
 
-  LargePage* AllocateLargePage(intptr_t object_size,
-                                      Executability executable,
-                                      Space* owner);
+  LargePage* AllocateLargePage(
+      intptr_t object_size, Space* owner, Executability executable);
 
   void Free(MemoryChunk* chunk);
 
@@ -1034,7 +1042,9 @@ class MemoryAllocator {
     return CodePageAreaEndOffset() - CodePageAreaStartOffset();
   }
 
-  static bool CommitCodePage(VirtualMemory* vm, Address start, size_t size);
+  MUST_USE_RESULT static bool CommitCodePage(VirtualMemory* vm,
+                                             Address start,
+                                             size_t size);
 
  private:
   Isolate* isolate_;
@@ -1512,6 +1522,10 @@ class PagedSpace : public Space {
     return size_in_bytes - wasted;
   }
 
+  void ResetFreeList() {
+    free_list_.Reset();
+  }
+
   // Set space allocation info.
   void SetTop(Address top, Address limit) {
     ASSERT(top == limit ||
@@ -1618,6 +1632,8 @@ class PagedSpace : public Space {
 
   // Maximum capacity of this space.
   intptr_t max_capacity_;
+
+  intptr_t SizeOfFirstPage();
 
   // Accounting information for this space.
   AllocationStats accounting_stats_;
@@ -2361,11 +2377,6 @@ class FixedSpace : public PagedSpace {
   // Prepares for a mark-compact GC.
   virtual void PrepareForMarkCompact();
 
- protected:
-  void ResetFreeList() {
-    free_list_.Reset();
-  }
-
  private:
   // The size of objects in this space.
   int object_size_in_bytes_;
@@ -2485,6 +2496,10 @@ class LargeObjectSpace : public Space {
     return objects_size_;
   }
 
+  intptr_t CommittedMemory() {
+    return Size();
+  }
+
   int PageCount() {
     return page_count_;
   }
@@ -2494,9 +2509,9 @@ class LargeObjectSpace : public Space {
   // space, may be slow.
   MaybeObject* FindObject(Address a);
 
-  // Finds a large object page containing the given pc, returns NULL
+  // Finds a large object page containing the given address, returns NULL
   // if such a page doesn't exist.
-  LargePage* FindPageContainingPc(Address pc);
+  LargePage* FindPage(Address a);
 
   // Frees unmarked objects.
   void FreeUnmarkedObjects();
@@ -2531,6 +2546,8 @@ class LargeObjectSpace : public Space {
   intptr_t size_;  // allocated bytes
   int page_count_;  // number of chunks
   intptr_t objects_size_;  // size of objects
+  // Map MemoryChunk::kAlignment-aligned chunks to large pages covering them
+  HashMap chunk_map_;
 
   friend class LargeObjectIterator;
 

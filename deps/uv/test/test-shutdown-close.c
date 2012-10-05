@@ -37,9 +37,9 @@ static int close_cb_called = 0;
 
 
 static void shutdown_cb(uv_shutdown_t* req, int status) {
+  int err = uv_last_error(uv_default_loop()).code;
   ASSERT(req == &shutdown_req);
-  ASSERT(status == 0 ||
-         (status == -1 && uv_last_error(uv_default_loop()).code == UV_EINTR));
+  ASSERT(status == 0 || (status == -1 && err == UV_ECANCELED));
   shutdown_cb_called++;
 }
 
@@ -57,7 +57,9 @@ static void connect_cb(uv_connect_t* req, int status) {
 
   r = uv_shutdown(&shutdown_req, req->handle, shutdown_cb);
   ASSERT(r == 0);
+  ASSERT(!uv_is_closing((uv_handle_t*) req->handle));
   uv_close((uv_handle_t*) req->handle, close_cb);
+  ASSERT(uv_is_closing((uv_handle_t*) req->handle));
 
   connect_cb_called++;
 }

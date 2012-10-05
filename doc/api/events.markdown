@@ -26,7 +26,7 @@ If there is no listener for it, then the default action is to print a stack
 trace and exit the program.
 
 All EventEmitters emit the event `'newListener'` when new listeners are
-added.
+added and `'removeListener'` when a listener is removed.
 
 ### emitter.addListener(event, listener)
 ### emitter.on(event, listener)
@@ -75,13 +75,13 @@ that to be increased. Set to zero for unlimited.
 
 ### emitter.listeners(event)
 
-Returns an array of listeners for the specified event. This array can be
-manipulated, e.g. to remove listeners.
+Returns an array of listeners for the specified event.
 
     server.on('connection', function (stream) {
       console.log('someone connected!');
     });
     console.log(util.inspect(server.listeners('connection'))); // [ [Function] ]
+
 
 ### emitter.emit(event, [arg1], [arg2], [...])
 

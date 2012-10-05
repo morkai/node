@@ -67,9 +67,11 @@ void Builtins::Generate_Adaptor(MacroAssembler* masm,
     ASSERT(extra_args == NO_EXTRA_ARGUMENTS);
   }
 
-  // JumpToExternalReference expects a0 to contain the number of arguments
+  // JumpToExternalReference expects s0 to contain the number of arguments
   // including the receiver and the extra arguments.
-  __ Addu(a0, a0, Operand(num_extra_args + 1));
+  __ Addu(s0, a0, num_extra_args + 1);
+  __ sll(s1, s0, kPointerSizeLog2);
+  __ Subu(s1, s1, kPointerSize);
   __ JumpToExternalReference(ExternalReference(id, masm->isolate()));
 }
 
@@ -77,12 +79,13 @@ void Builtins::Generate_Adaptor(MacroAssembler* masm,
 // Load the built-in InternalArray function from the current context.
 static void GenerateLoadInternalArrayFunction(MacroAssembler* masm,
                                               Register result) {
-  // Load the global context.
+  // Load the native context.
 
-  __ lw(result, MemOperand(cp, Context::SlotOffset(Context::GLOBAL_INDEX)));
   __ lw(result,
-        FieldMemOperand(result, GlobalObject::kGlobalContextOffset));
-  // Load the InternalArray function from the global context.
+        MemOperand(cp, Context::SlotOffset(Context::GLOBAL_OBJECT_INDEX)));
+  __ lw(result,
+        FieldMemOperand(result, GlobalObject::kNativeContextOffset));
+  // Load the InternalArray function from the native context.
   __ lw(result,
          MemOperand(result,
                     Context::SlotOffset(
@@ -92,12 +95,13 @@ static void GenerateLoadInternalArrayFunction(MacroAssembler* masm,
 
 // Load the built-in Array function from the current context.
 static void GenerateLoadArrayFunction(MacroAssembler* masm, Register result) {
-  // Load the global context.
+  // Load the native context.
 
-  __ lw(result, MemOperand(cp, Context::SlotOffset(Context::GLOBAL_INDEX)));
   __ lw(result,
-        FieldMemOperand(result, GlobalObject::kGlobalContextOffset));
-  // Load the Array function from the global context.
+        MemOperand(cp, Context::SlotOffset(Context::GLOBAL_OBJECT_INDEX)));
+  __ lw(result,
+        FieldMemOperand(result, GlobalObject::kNativeContextOffset));
+  // Load the Array function from the native context.
   __ lw(result,
         MemOperand(result,
                    Context::SlotOffset(Context::ARRAY_FUNCTION_INDEX)));
@@ -116,7 +120,7 @@ static void AllocateEmptyJSArray(MacroAssembler* masm,
                                  Label* gc_required) {
   const int initial_capacity = JSArray::kPreallocatedArrayElements;
   STATIC_ASSERT(initial_capacity >= 0);
-  __ LoadInitialArrayMap(array_function, scratch2, scratch1);
+  __ LoadInitialArrayMap(array_function, scratch2, scratch1, false);
 
   // Allocate the JSArray object together with space for a fixed array with the
   // requested elements.
@@ -212,7 +216,8 @@ static void AllocateJSArray(MacroAssembler* masm,
                             bool fill_with_hole,
                             Label* gc_required) {
   // Load the initial map from the array function.
-  __ LoadInitialArrayMap(array_function, scratch2, elements_array_storage);
+  __ LoadInitialArrayMap(array_function, scratch2,
+                         elements_array_storage, fill_with_hole);
 
   if (FLAG_debug_code) {  // Assert that array size is not zero.
     __ Assert(
@@ -447,10 +452,10 @@ static void ArrayNativeCode(MacroAssembler* masm,
   __ Branch(call_generic_code);
 
   __ bind(&not_double);
-  // Transition FAST_SMI_ONLY_ELEMENTS to FAST_ELEMENTS.
+  // Transition FAST_SMI_ELEMENTS to FAST_ELEMENTS.
   // a3: JSArray
   __ lw(a2, FieldMemOperand(a3, HeapObject::kMapOffset));
-  __ LoadTransitionedArrayMapConditional(FAST_SMI_ONLY_ELEMENTS,
+  __ LoadTransitionedArrayMapConditional(FAST_SMI_ELEMENTS,
                                          FAST_ELEMENTS,
                                          a2,
                                          t5,
@@ -707,6 +712,43 @@ void Builtins::Generate_StringConstructCode(MacroAssembler* masm) {
     __ CallRuntime(Runtime::kNewStringWrapper, 1);
   }
   __ Ret();
+}
+
+
+static void GenerateTailCallToSharedCode(MacroAssembler* masm) {
+  __ lw(a2, FieldMemOperand(a1, JSFunction::kSharedFunctionInfoOffset));
+  __ lw(a2, FieldMemOperand(a2, SharedFunctionInfo::kCodeOffset));
+  __ Addu(at, a2, Operand(Code::kHeaderSize - kHeapObjectTag));
+  __ Jump(at);
+}
+
+
+void Builtins::Generate_InRecompileQueue(MacroAssembler* masm) {
+  GenerateTailCallToSharedCode(masm);
+}
+
+
+void Builtins::Generate_ParallelRecompile(MacroAssembler* masm) {
+  {
+    FrameScope scope(masm, StackFrame::INTERNAL);
+
+    // Push a copy of the function onto the stack.
+    __ push(a1);
+    // Push call kind information.
+    __ push(t1);
+
+    __ push(a1);  // Function is also the parameter to the runtime call.
+    __ CallRuntime(Runtime::kParallelRecompile, 1);
+
+    // Restore call kind information.
+    __ pop(t1);
+    // Restore receiver.
+    __ pop(a1);
+
+    // Tear down internal frame.
+  }
+
+  GenerateTailCallToSharedCode(masm);
 }
 
 
@@ -1008,6 +1050,11 @@ static void Generate_JSConstructStubHelper(MacroAssembler* masm,
                         NullCallWrapper(), CALL_AS_METHOD);
     }
 
+    // Store offset of return address for deoptimizer.
+    if (!is_api_function && !count_constructions) {
+      masm->isolate()->heap()->SetConstructStubDeoptPCOffset(masm->pc_offset());
+    }
+
     // Restore context from the frame.
     __ lw(cp, MemOperand(fp, StandardFrameConstants::kContextOffset));
 
@@ -1089,8 +1136,6 @@ static void Generate_JSEntryTrampolineHelper(MacroAssembler* masm,
 
     // Set up the context from the function argument.
     __ lw(cp, FieldMemOperand(a1, JSFunction::kContextOffset));
-
-    __ InitializeRootRegister();
 
     // Push the function and the receiver onto the stack.
     __ Push(a1, a2);
@@ -1387,9 +1432,9 @@ void Builtins::Generate_FunctionCall(MacroAssembler* masm) {
     // receiver.
     __ bind(&use_global_receiver);
     const int kGlobalIndex =
-        Context::kHeaderSize + Context::GLOBAL_INDEX * kPointerSize;
+        Context::kHeaderSize + Context::GLOBAL_OBJECT_INDEX * kPointerSize;
     __ lw(a2, FieldMemOperand(cp, kGlobalIndex));
-    __ lw(a2, FieldMemOperand(a2, GlobalObject::kGlobalContextOffset));
+    __ lw(a2, FieldMemOperand(a2, GlobalObject::kNativeContextOffset));
     __ lw(a2, FieldMemOperand(a2, kGlobalIndex));
     __ lw(a2, FieldMemOperand(a2, GlobalObject::kGlobalReceiverOffset));
 
@@ -1580,9 +1625,9 @@ void Builtins::Generate_FunctionApply(MacroAssembler* masm) {
     // Use the current global receiver object as the receiver.
     __ bind(&use_global_receiver);
     const int kGlobalOffset =
-        Context::kHeaderSize + Context::GLOBAL_INDEX * kPointerSize;
+        Context::kHeaderSize + Context::GLOBAL_OBJECT_INDEX * kPointerSize;
     __ lw(a0, FieldMemOperand(cp, kGlobalOffset));
-    __ lw(a0, FieldMemOperand(a0, GlobalObject::kGlobalContextOffset));
+    __ lw(a0, FieldMemOperand(a0, GlobalObject::kNativeContextOffset));
     __ lw(a0, FieldMemOperand(a0, kGlobalOffset));
     __ lw(a0, FieldMemOperand(a0, GlobalObject::kGlobalReceiverOffset));
 
@@ -1730,8 +1775,6 @@ void Builtins::Generate_ArgumentsAdaptorTrampoline(MacroAssembler* masm) {
     __ bind(&too_few);
     EnterArgumentsAdaptorFrame(masm);
 
-    // TODO(MIPS): Optimize these loops.
-
     // Calculate copy start address into a0 and copy end address is fp.
     // a0: actual number of arguments as a smi
     // a1: function
@@ -1753,9 +1796,10 @@ void Builtins::Generate_ArgumentsAdaptorTrampoline(MacroAssembler* masm) {
     Label copy;
     __ bind(&copy);
     __ lw(t0, MemOperand(a0));  // Adjusted above for return addr and receiver.
-    __ push(t0);
+    __ Subu(sp, sp, kPointerSize);
     __ Subu(a0, a0, kPointerSize);
-    __ Branch(&copy, ne, a0, Operand(t3));
+    __ Branch(USE_DELAY_SLOT, &copy, ne, a0, Operand(t3));
+    __ sw(t0, MemOperand(sp));  // In the delay slot.
 
     // Fill the remaining expected arguments with undefined.
     // a1: function
@@ -1768,8 +1812,9 @@ void Builtins::Generate_ArgumentsAdaptorTrampoline(MacroAssembler* masm) {
 
     Label fill;
     __ bind(&fill);
-    __ push(t0);
-    __ Branch(&fill, ne, sp, Operand(a2));
+    __ Subu(sp, sp, kPointerSize);
+    __ Branch(USE_DELAY_SLOT, &fill, ne, sp, Operand(a2));
+    __ sw(t0, MemOperand(sp));
   }
 
   // Call the entry point.
@@ -1777,7 +1822,9 @@ void Builtins::Generate_ArgumentsAdaptorTrampoline(MacroAssembler* masm) {
 
   __ Call(a3);
 
+  // Store offset of return address for deoptimizer.
   masm->isolate()->heap()->SetArgumentsAdaptorDeoptPCOffset(masm->pc_offset());
+
   // Exit frame and return.
   LeaveArgumentsAdaptorFrame(masm);
   __ Ret();

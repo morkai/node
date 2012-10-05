@@ -19,9 +19,6 @@
  * IN THE SOFTWARE.
  */
 
-/* FIXME we shouldn't need to branch in this file */
-#define UNIX (defined(__unix__) || defined(__POSIX__) || defined(__APPLE__))
-
 #include "uv.h"
 #include "task.h"
 
@@ -30,8 +27,9 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 
-
-#if UNIX
+/* FIXME we shouldn't need to branch in this file */
+#if defined(__unix__) || defined(__POSIX__) || \
+    defined(__APPLE__) || defined(_AIX)
 #include <unistd.h> /* unlink, rmdir, etc. */
 #else
 # include <direct.h>
@@ -46,6 +44,7 @@
 #endif
 
 #define TOO_LONG_NAME_LENGTH 65536
+#define PATHMAX 1024
 
 typedef struct {
   const char* path;
@@ -544,7 +543,7 @@ static void check_utime(const char* path, double atime, double mtime) {
   ASSERT(req.result == 0);
   s = req.ptr;
 
-#if _WIN32
+#if defined(_WIN32) || defined(_AIX)
   ASSERT(s->st_atime == atime);
   ASSERT(s->st_mtime == mtime);
 #elif !defined(_POSIX_C_SOURCE) || defined(_DARWIN_C_SOURCE)
@@ -1223,10 +1222,10 @@ TEST_IMPL(fs_symlink) {
        * We just pass the test and bail out early if we get ENOTSUP.
        */
       return 0;
-    } else if (uv_last_error(loop).sys_errno_ == ERROR_PRIVILEGE_NOT_HELD) {
+    } else if (uv_last_error(loop).code == UV_EPERM) {
       /*
        * Creating a symlink is only allowed when running elevated.
-       * We pass the test and bail out early if we get ERROR_PRIVILEGE_NOT_HELD.
+       * We pass the test and bail out early if we get UV_EPERM.
        */
       return 0;
     }
@@ -1296,6 +1295,117 @@ TEST_IMPL(fs_symlink) {
   unlink("test_file_symlink_symlink");
   unlink("test_file_symlink2");
   unlink("test_file_symlink2_symlink");
+
+  return 0;
+}
+
+
+TEST_IMPL(fs_symlink_dir) {
+  uv_fs_t req;
+  int r;
+  char* test_dir;
+
+  /* set-up */
+  unlink("test_dir/file1");
+  unlink("test_dir/file2");
+  rmdir("test_dir");
+  rmdir("test_dir_symlink");
+
+  loop = uv_default_loop();
+
+  uv_fs_mkdir(loop, &req, "test_dir", 0777, NULL);
+  uv_fs_req_cleanup(&req);
+
+#ifdef _WIN32
+  {
+    static char src_path_buf[PATHMAX];
+    strcpy(src_path_buf, "\\\\?\\");
+    uv_cwd(src_path_buf + 4, sizeof(src_path_buf));
+    strcat(src_path_buf, "\\test_dir\\");
+    test_dir = src_path_buf;
+  }
+#else
+  test_dir = "test_dir";
+#endif
+
+  r = uv_fs_symlink(loop, &req, test_dir, "test_dir_symlink",
+    UV_FS_SYMLINK_JUNCTION, NULL);
+  ASSERT(r == 0);
+  ASSERT(req.result == 0);
+  uv_fs_req_cleanup(&req);
+
+  r = uv_fs_stat(loop, &req, "test_dir_symlink", NULL);
+  ASSERT(r == 0);
+  ASSERT(((struct stat*)req.ptr)->st_mode & S_IFDIR);
+  uv_fs_req_cleanup(&req);
+
+  r = uv_fs_lstat(loop, &req, "test_dir_symlink", NULL);
+  ASSERT(r == 0);
+  ASSERT(((struct stat*)req.ptr)->st_mode & S_IFLNK);
+#ifdef _WIN32
+  ASSERT(((struct stat*)req.ptr)->st_size == strlen(test_dir + 4));
+#else
+  ASSERT(((struct stat*)req.ptr)->st_size == strlen(test_dir));
+#endif
+  uv_fs_req_cleanup(&req);
+
+  r = uv_fs_readlink(loop, &req, "test_dir_symlink", NULL);
+  ASSERT(r == 0);
+#ifdef _WIN32
+  ASSERT(strcmp(req.ptr, test_dir + 4) == 0);
+#else
+  ASSERT(strcmp(req.ptr, test_dir) == 0);
+#endif
+  uv_fs_req_cleanup(&req);
+
+  r = uv_fs_open(loop, &open_req1, "test_dir/file1", O_WRONLY | O_CREAT,
+      S_IWRITE | S_IREAD, NULL);
+  ASSERT(r != -1);
+  uv_fs_req_cleanup(&open_req1);
+  r = uv_fs_close(loop, &close_req, open_req1.result, NULL);
+  ASSERT(r == 0);
+  uv_fs_req_cleanup(&close_req);
+
+  r = uv_fs_open(loop, &open_req1, "test_dir/file2", O_WRONLY | O_CREAT,
+      S_IWRITE | S_IREAD, NULL);
+  ASSERT(r != -1);
+  uv_fs_req_cleanup(&open_req1);
+  r = uv_fs_close(loop, &close_req, open_req1.result, NULL);
+  ASSERT(r == 0);
+  uv_fs_req_cleanup(&close_req);
+
+  r = uv_fs_readdir(loop, &readdir_req, "test_dir_symlink", 0, NULL);
+  ASSERT(r == 2);
+  ASSERT(readdir_req.result == 2);
+  ASSERT(readdir_req.ptr);
+  ASSERT(memcmp(readdir_req.ptr, "file1\0file2\0", 12) == 0
+      || memcmp(readdir_req.ptr, "file2\0file1\0", 12) == 0);
+  uv_fs_req_cleanup(&readdir_req);
+  ASSERT(!readdir_req.ptr);
+
+  /* unlink will remove the directory symlink */
+  r = uv_fs_unlink(loop, &req, "test_dir_symlink", NULL);
+  ASSERT(r == 0);
+  uv_fs_req_cleanup(&req);
+
+  r = uv_fs_readdir(loop, &readdir_req, "test_dir_symlink", 0, NULL);
+  ASSERT(r == -1);
+  uv_fs_req_cleanup(&readdir_req);
+
+  r = uv_fs_readdir(loop, &readdir_req, "test_dir", 0, NULL);
+  ASSERT(r == 2);
+  ASSERT(readdir_req.result == 2);
+  ASSERT(readdir_req.ptr);
+  ASSERT(memcmp(readdir_req.ptr, "file1\0file2\0", 12) == 0
+      || memcmp(readdir_req.ptr, "file2\0file1\0", 12) == 0);
+  uv_fs_req_cleanup(&readdir_req);
+  ASSERT(!readdir_req.ptr);
+
+  /* clean-up */
+  unlink("test_dir/file1");
+  unlink("test_dir/file2");
+  rmdir("test_dir");
+  rmdir("test_dir_symlink");
 
   return 0;
 }

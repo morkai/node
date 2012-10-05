@@ -85,7 +85,14 @@ enum SmiCheck { INLINE_SMI_CHECK, OMIT_SMI_CHECK };
 enum LinkRegisterStatus { kLRHasNotBeenSaved, kLRHasBeenSaved };
 
 
-bool AreAliased(Register r1, Register r2, Register r3, Register r4);
+#ifdef DEBUG
+bool AreAliased(Register reg1,
+                Register reg2,
+                Register reg3 = no_reg,
+                Register reg4 = no_reg,
+                Register reg5 = no_reg,
+                Register reg6 = no_reg);
+#endif
 
 
 // MacroAssembler implements a collection of frequently used macros.
@@ -103,17 +110,18 @@ class MacroAssembler: public Assembler {
   void Jump(Handle<Code> code, RelocInfo::Mode rmode, Condition cond = al);
   static int CallSize(Register target, Condition cond = al);
   void Call(Register target, Condition cond = al);
-  static int CallSize(Address target,
-                      RelocInfo::Mode rmode,
-                      Condition cond = al);
+  int CallSize(Address target, RelocInfo::Mode rmode, Condition cond = al);
+  static int CallSizeNotPredictableCodeSize(Address target,
+                                            RelocInfo::Mode rmode,
+                                            Condition cond = al);
   void Call(Address target, RelocInfo::Mode rmode, Condition cond = al);
-  static int CallSize(Handle<Code> code,
-                      RelocInfo::Mode rmode = RelocInfo::CODE_TARGET,
-                      unsigned ast_id = kNoASTId,
-                      Condition cond = al);
+  int CallSize(Handle<Code> code,
+               RelocInfo::Mode rmode = RelocInfo::CODE_TARGET,
+               TypeFeedbackId ast_id = TypeFeedbackId::None(),
+               Condition cond = al);
   void Call(Handle<Code> code,
             RelocInfo::Mode rmode = RelocInfo::CODE_TARGET,
-            unsigned ast_id = kNoASTId,
+            TypeFeedbackId ast_id = TypeFeedbackId::None(),
             Condition cond = al);
   void Ret(Condition cond = al);
 
@@ -492,8 +500,8 @@ class MacroAssembler: public Assembler {
   void LoadContext(Register dst, int context_chain_length);
 
   // Conditionally load the cached Array transitioned map of type
-  // transitioned_kind from the global context if the map in register
-  // map_in_out is the cached Array map in the global context of
+  // transitioned_kind from the native context if the map in register
+  // map_in_out is the cached Array map in the native context of
   // expected_kind.
   void LoadTransitionedArrayMapConditional(
       ElementsKind expected_kind,
@@ -505,7 +513,8 @@ class MacroAssembler: public Assembler {
   // Load the initial map for new Arrays from a JSFunction.
   void LoadInitialArrayMap(Register function_in,
                            Register scratch,
-                           Register map_out);
+                           Register map_out,
+                           bool can_have_holes);
 
   void LoadGlobalFunction(int index, Register function);
 
@@ -795,9 +804,9 @@ class MacroAssembler: public Assembler {
 
   // Check if a map for a JSObject indicates that the object has fast smi only
   // elements.  Jump to the specified label if it does not.
-  void CheckFastSmiOnlyElements(Register map,
-                                Register scratch,
-                                Label* fail);
+  void CheckFastSmiElements(Register map,
+                            Register scratch,
+                            Label* fail);
 
   // Check to see if maybe_number can be stored as a double in
   // FastDoubleElements. If it can, store it at the index specified by key in
@@ -819,6 +828,13 @@ class MacroAssembler: public Assembler {
   // compare sequences branches to early_success.
   void CompareMap(Register obj,
                   Register scratch,
+                  Handle<Map> map,
+                  Label* early_success,
+                  CompareMapMode mode = REQUIRE_EXACT_MAP);
+
+  // As above, but the map of the object is already loaded into the register
+  // which is preserved by the code generated.
+  void CompareMap(Register obj_map,
                   Handle<Map> map,
                   Label* early_success,
                   CompareMapMode mode = REQUIRE_EXACT_MAP);
@@ -1253,7 +1269,10 @@ class MacroAssembler: public Assembler {
                           DoubleRegister temp_double_reg);
 
 
-  void LoadInstanceDescriptors(Register map, Register descriptors);
+  void LoadInstanceDescriptors(Register map,
+                               Register descriptors,
+                               Register scratch);
+  void EnumLength(Register dst, Register map);
 
   // Activation support.
   void EnterFrame(StackFrame::Type type);
@@ -1321,7 +1340,6 @@ class MacroAssembler: public Assembler {
 };
 
 
-#ifdef ENABLE_DEBUGGER_SUPPORT
 // The code patcher is used to patch (typically) small parts of code e.g. for
 // debugging and other types of instrumentation. When using the code patcher
 // the exact number of bytes specified must be emitted. It is not legal to emit
@@ -1351,7 +1369,6 @@ class CodePatcher {
   int size_;  // Number of bytes of the expected patch size.
   MacroAssembler masm_;  // Macro assembler used to generate the code.
 };
-#endif  // ENABLE_DEBUGGER_SUPPORT
 
 
 // -----------------------------------------------------------------------------
@@ -1363,7 +1380,7 @@ inline MemOperand ContextOperand(Register context, int index) {
 
 
 inline MemOperand GlobalObjectOperand()  {
-  return ContextOperand(cp, Context::GLOBAL_INDEX);
+  return ContextOperand(cp, Context::GLOBAL_OBJECT_INDEX);
 }
 
 

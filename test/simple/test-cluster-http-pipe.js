@@ -19,6 +19,11 @@
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
 // USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+// It is not possible to send pipe handles over the IPC pipe on Windows.
+if (process.platform === 'win32') {
+  process.exit(0);
+}
+
 var common = require('../common');
 var assert = require('assert');
 var cluster = require('cluster');
@@ -31,7 +36,7 @@ if (cluster.isMaster) {
     assert.equal(msg, 'DONE');
     ok = true;
   });
-  worker.on('death', function() {
+  worker.on('exit', function() {
     process.exit();
   });
   process.on('exit', function() {

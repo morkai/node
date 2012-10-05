@@ -210,7 +210,6 @@ class SnapshotByteSource {
 class SerializerDeserializer: public ObjectVisitor {
  public:
   static void Iterate(ObjectVisitor* visitor);
-  static void SetSnapshotCacheSize(int size);
 
  protected:
   // Where the pointed-to object can be found:
@@ -243,7 +242,7 @@ class SerializerDeserializer: public ObjectVisitor {
   // Where to point within the object.
   enum WhereToPoint {
     kStartOfObject = 0,
-    kFirstInstruction = 0x80,
+    kInnerPointer = 0x80,  // First insn in code object or payload of cell.
     kWhereToPointMask = 0x80
   };
 
@@ -485,7 +484,7 @@ class Serializer : public SerializerDeserializer {
  protected:
   static const int kInvalidRootIndex = -1;
 
-  int RootIndex(HeapObject* heap_object);
+  int RootIndex(HeapObject* heap_object, HowToCode from);
   virtual bool ShouldBeInThePartialSnapshotCache(HeapObject* o) = 0;
   intptr_t root_index_wave_front() { return root_index_wave_front_; }
   void set_root_index_wave_front(intptr_t value) {

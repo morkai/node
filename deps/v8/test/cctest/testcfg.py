@@ -53,6 +53,8 @@ class CcTestCase(test.TestCase):
       serialization_file = join('obj', 'test', self.mode, 'serdes')
     else:
       serialization_file = join('obj', 'serdes')
+      if not exists(join(self.context.buildspace, 'obj')):
+        os.makedirs(join(self.context.buildspace, 'obj'))
     serialization_file += '_' + self.GetName()
     serialization_file = join(self.context.buildspace, serialization_file)
     serialization_file += ''.join(self.variant_flags).replace('-', '_')
@@ -91,7 +93,8 @@ class CcTestConfiguration(test.TestConfiguration):
       if utils.IsWindows():
         executable += '.exe'
       executable = join(self.context.buildspace, executable)
-    output = test.Execute([executable, '--list'], self.context)
+    full_command = self.context.processor([executable, '--list'])
+    output = test.Execute(full_command, self.context)
     if output.exit_code != 0:
       print output.stdout
       print output.stderr

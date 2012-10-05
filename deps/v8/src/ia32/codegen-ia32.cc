@@ -30,6 +30,7 @@
 #if defined(V8_TARGET_ARCH_IA32)
 
 #include "codegen.h"
+#include "heap.h"
 #include "macro-assembler.h"
 
 namespace v8 {
@@ -54,6 +55,85 @@ void StubRuntimeCallHelper::AfterCall(MacroAssembler* masm) const {
 
 
 #define __ masm.
+
+
+UnaryMathFunction CreateTranscendentalFunction(TranscendentalCache::Type type) {
+  size_t actual_size;
+  // Allocate buffer in executable space.
+  byte* buffer = static_cast<byte*>(OS::Allocate(1 * KB,
+                                                 &actual_size,
+                                                 true));
+  if (buffer == NULL) {
+    // Fallback to library function if function cannot be created.
+    switch (type) {
+      case TranscendentalCache::SIN: return &sin;
+      case TranscendentalCache::COS: return &cos;
+      case TranscendentalCache::TAN: return &tan;
+      case TranscendentalCache::LOG: return &log;
+      default: UNIMPLEMENTED();
+    }
+  }
+
+  MacroAssembler masm(NULL, buffer, static_cast<int>(actual_size));
+  // esp[1 * kPointerSize]: raw double input
+  // esp[0 * kPointerSize]: return address
+  // Move double input into registers.
+
+  __ push(ebx);
+  __ push(edx);
+  __ push(edi);
+  __ fld_d(Operand(esp, 4 * kPointerSize));
+  __ mov(ebx, Operand(esp, 4 * kPointerSize));
+  __ mov(edx, Operand(esp, 5 * kPointerSize));
+  TranscendentalCacheStub::GenerateOperation(&masm, type);
+  // The return value is expected to be on ST(0) of the FPU stack.
+  __ pop(edi);
+  __ pop(edx);
+  __ pop(ebx);
+  __ Ret();
+
+  CodeDesc desc;
+  masm.GetCode(&desc);
+  ASSERT(desc.reloc_size == 0);
+
+  CPU::FlushICache(buffer, actual_size);
+  OS::ProtectCode(buffer, actual_size);
+  return FUNCTION_CAST<UnaryMathFunction>(buffer);
+}
+
+
+UnaryMathFunction CreateSqrtFunction() {
+  size_t actual_size;
+  // Allocate buffer in executable space.
+  byte* buffer = static_cast<byte*>(OS::Allocate(1 * KB,
+                                                 &actual_size,
+                                                 true));
+  // If SSE2 is not available, we can use libc's implementation to ensure
+  // consistency since code by fullcodegen's calls into runtime in that case.
+  if (buffer == NULL || !CpuFeatures::IsSupported(SSE2)) return &sqrt;
+  MacroAssembler masm(NULL, buffer, static_cast<int>(actual_size));
+  // esp[1 * kPointerSize]: raw double input
+  // esp[0 * kPointerSize]: return address
+  // Move double input into registers.
+  {
+    CpuFeatures::Scope use_sse2(SSE2);
+    __ movdbl(xmm0, Operand(esp, 1 * kPointerSize));
+    __ sqrtsd(xmm0, xmm0);
+    __ movdbl(Operand(esp, 1 * kPointerSize), xmm0);
+    // Load result into floating point register as return value.
+    __ fld_d(Operand(esp, 1 * kPointerSize));
+    __ Ret();
+  }
+
+  CodeDesc desc;
+  masm.GetCode(&desc);
+  ASSERT(desc.reloc_size == 0);
+
+  CPU::FlushICache(buffer, actual_size);
+  OS::ProtectCode(buffer, actual_size);
+  return FUNCTION_CAST<UnaryMathFunction>(buffer);
+}
+
 
 static void MemCopyWrapper(void* dest, const void* src, size_t size) {
   memcpy(dest, src, size);
@@ -271,7 +351,7 @@ OS::MemCopyFunction CreateMemCopyFunction() {
 
 #define __ ACCESS_MASM(masm)
 
-void ElementsTransitionGenerator::GenerateSmiOnlyToObject(
+void ElementsTransitionGenerator::GenerateMapChangeElementsTransition(
     MacroAssembler* masm) {
   // ----------- S t a t e -------------
   //  -- eax    : value
@@ -292,7 +372,7 @@ void ElementsTransitionGenerator::GenerateSmiOnlyToObject(
 }
 
 
-void ElementsTransitionGenerator::GenerateSmiOnlyToDouble(
+void ElementsTransitionGenerator::GenerateSmiToDouble(
     MacroAssembler* masm, Label* fail) {
   // ----------- S t a t e -------------
   //  -- eax    : value
@@ -317,8 +397,24 @@ void ElementsTransitionGenerator::GenerateSmiOnlyToDouble(
   // Allocate new FixedDoubleArray.
   // edx: receiver
   // edi: length of source FixedArray (smi-tagged)
-  __ lea(esi, Operand(edi, times_4, FixedDoubleArray::kHeaderSize));
+  __ lea(esi, Operand(edi,
+                      times_4,
+                      FixedDoubleArray::kHeaderSize + kPointerSize));
   __ AllocateInNewSpace(esi, eax, ebx, no_reg, &gc_required, TAG_OBJECT);
+
+  Label aligned, aligned_done;
+  __ test(eax, Immediate(kDoubleAlignmentMask - kHeapObjectTag));
+  __ j(zero, &aligned, Label::kNear);
+  __ mov(FieldOperand(eax, 0),
+         Immediate(masm->isolate()->factory()->one_pointer_filler_map()));
+  __ add(eax, Immediate(kPointerSize));
+  __ jmp(&aligned_done);
+
+  __ bind(&aligned);
+  __ mov(Operand(eax, esi, times_1, -kPointerSize-1),
+         Immediate(masm->isolate()->factory()->one_pointer_filler_map()));
+
+  __ bind(&aligned_done);
 
   // eax: destination FixedDoubleArray
   // edi: number of elements

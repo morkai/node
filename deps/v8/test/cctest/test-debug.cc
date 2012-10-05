@@ -197,10 +197,9 @@ static bool HasDebugInfo(v8::Handle<v8::Function> fun) {
 // number.
 static int SetBreakPoint(Handle<v8::internal::JSFunction> fun, int position) {
   static int break_point = 0;
-  Handle<v8::internal::SharedFunctionInfo> shared(fun->shared());
   v8::internal::Debug* debug = v8::internal::Isolate::Current()->debug();
   debug->SetBreakPoint(
-      shared,
+      fun,
       Handle<Object>(v8::internal::Smi::FromInt(++break_point)),
       &position);
   return break_point;
@@ -515,7 +514,7 @@ void CheckDebugBreakFunction(DebugLocalContext* env,
   // there
   ClearBreakPoint(bp);
   CHECK(!debug->HasDebugInfo(shared));
-  CHECK(debug->EnsureDebugInfo(shared));
+  CHECK(debug->EnsureDebugInfo(shared, fun));
   TestBreakLocationIterator it2(Debug::GetDebugInfo(shared));
   it2.FindBreakLocationFromPosition(position);
   actual_mode = it2.it()->rinfo()->rmode();
@@ -2745,7 +2744,7 @@ TEST(DebugStepKeyedLoadLoop) {
   foo->Call(env->Global(), kArgc, args);
 
   // With stepping all break locations are hit.
-  CHECK_EQ(33, break_point_hit_count);
+  CHECK_EQ(34, break_point_hit_count);
 
   v8::Debug::SetDebugEventListener(NULL);
   CheckDebuggerUnloaded();
@@ -2792,7 +2791,7 @@ TEST(DebugStepKeyedStoreLoop) {
   foo->Call(env->Global(), kArgc, args);
 
   // With stepping all break locations are hit.
-  CHECK_EQ(32, break_point_hit_count);
+  CHECK_EQ(33, break_point_hit_count);
 
   v8::Debug::SetDebugEventListener(NULL);
   CheckDebuggerUnloaded();
@@ -2836,7 +2835,7 @@ TEST(DebugStepNamedLoadLoop) {
   foo->Call(env->Global(), 0, NULL);
 
   // With stepping all break locations are hit.
-  CHECK_EQ(53, break_point_hit_count);
+  CHECK_EQ(54, break_point_hit_count);
 
   v8::Debug::SetDebugEventListener(NULL);
   CheckDebuggerUnloaded();
@@ -2880,7 +2879,7 @@ static void DoDebugStepNamedStoreLoop(int expected) {
 
 // Test of the stepping mechanism for named load in a loop.
 TEST(DebugStepNamedStoreLoop) {
-  DoDebugStepNamedStoreLoop(22);
+  DoDebugStepNamedStoreLoop(23);
 }
 
 
@@ -3252,7 +3251,7 @@ TEST(DebugStepForContinue) {
   v8::Handle<v8::Value> argv_10[argc] = { v8::Number::New(10) };
   result = foo->Call(env->Global(), argc, argv_10);
   CHECK_EQ(5, result->Int32Value());
-  CHECK_EQ(50, break_point_hit_count);
+  CHECK_EQ(51, break_point_hit_count);
 
   // Looping 100 times.
   step_action = StepIn;
@@ -3260,7 +3259,7 @@ TEST(DebugStepForContinue) {
   v8::Handle<v8::Value> argv_100[argc] = { v8::Number::New(100) };
   result = foo->Call(env->Global(), argc, argv_100);
   CHECK_EQ(50, result->Int32Value());
-  CHECK_EQ(455, break_point_hit_count);
+  CHECK_EQ(456, break_point_hit_count);
 
   // Get rid of the debug event listener.
   v8::Debug::SetDebugEventListener(NULL);
@@ -3304,7 +3303,7 @@ TEST(DebugStepForBreak) {
   v8::Handle<v8::Value> argv_10[argc] = { v8::Number::New(10) };
   result = foo->Call(env->Global(), argc, argv_10);
   CHECK_EQ(9, result->Int32Value());
-  CHECK_EQ(53, break_point_hit_count);
+  CHECK_EQ(54, break_point_hit_count);
 
   // Looping 100 times.
   step_action = StepIn;
@@ -3312,7 +3311,7 @@ TEST(DebugStepForBreak) {
   v8::Handle<v8::Value> argv_100[argc] = { v8::Number::New(100) };
   result = foo->Call(env->Global(), argc, argv_100);
   CHECK_EQ(99, result->Int32Value());
-  CHECK_EQ(503, break_point_hit_count);
+  CHECK_EQ(504, break_point_hit_count);
 
   // Get rid of the debug event listener.
   v8::Debug::SetDebugEventListener(NULL);
@@ -4274,9 +4273,9 @@ TEST(InterceptorPropertyMirror) {
                  "named_values[%d] instanceof debug.PropertyMirror", i);
     CHECK(CompileRun(buffer.start())->BooleanValue());
 
-    // 5 is PropertyType.Interceptor
     OS::SNPrintF(buffer, "named_values[%d].propertyType()", i);
-    CHECK_EQ(5, CompileRun(buffer.start())->Int32Value());
+    CHECK_EQ(v8::internal::INTERCEPTOR,
+             CompileRun(buffer.start())->Int32Value());
 
     OS::SNPrintF(buffer, "named_values[%d].isNative()", i);
     CHECK(CompileRun(buffer.start())->BooleanValue());
@@ -5013,7 +5012,10 @@ static void ThreadedMessageHandler(const v8::Debug::Message& message) {
   if (IsBreakEventMessage(print_buffer)) {
     // Check that we are inside the while loop.
     int source_line = GetSourceLineFromBreakEventMessage(print_buffer);
-    CHECK(8 <= source_line && source_line <= 13);
+    // TODO(2047): This should really be 8 <= source_line <= 13; but we
+    // currently have an off-by-one error when calculating the source
+    // position corresponding to the program counter at the debug break.
+    CHECK(7 <= source_line && source_line <= 13);
     threaded_debugging_barriers.barrier_2.Wait();
   }
 }
@@ -7208,10 +7210,10 @@ static void TestDebugBreakInLoop(const char* loop_head,
   // Receive 100 breaks for each test and then terminate JavaScript execution.
   static const int kBreaksPerTest = 100;
 
-  for (int i = 0; i < 1 && loop_bodies[i] != NULL; i++) {
+  for (int i = 0; loop_bodies[i] != NULL; i++) {
     // Perform a lazy deoptimization after various numbers of breaks
     // have been hit.
-    for (int j = 0; j < 10; j++) {
+    for (int j = 0; j < 11; j++) {
       break_point_hit_count_deoptimize = j;
       if (j == 10) {
         break_point_hit_count_deoptimize = kBreaksPerTest;
@@ -7344,6 +7346,96 @@ TEST(DebugBreakInline) {
   v8::Debug::SetDebugEventListener(DebugBreakInlineListener);
   inline_script = v8::Script::Compile(v8::String::New(source));
   inline_script->Run();
+}
+
+
+static void DebugEventStepNext(v8::DebugEvent event,
+                               v8::Handle<v8::Object> exec_state,
+                               v8::Handle<v8::Object> event_data,
+                               v8::Handle<v8::Value> data) {
+  if (event == v8::Break) {
+    PrepareStep(StepNext);
+  }
+}
+
+
+static void RunScriptInANewCFrame(const char* source) {
+  v8::TryCatch try_catch;
+  CompileRun(source);
+  CHECK(try_catch.HasCaught());
+}
+
+
+TEST(Regress131642) {
+  // Bug description:
+  // When doing StepNext through the first script, the debugger is not reset
+  // after exiting through exception.  A flawed implementation enabling the
+  // debugger to step into Array.prototype.forEach breaks inside the callback
+  // for forEach in the second script under the assumption that we are in a
+  // recursive call.  In an attempt to step out, we crawl the stack using the
+  // recorded frame pointer from the first script and fail when not finding it
+  // on the stack.
+  v8::HandleScope scope;
+  DebugLocalContext env;
+  v8::Debug::SetDebugEventListener(DebugEventStepNext);
+
+  // We step through the first script.  It exits through an exception.  We run
+  // this inside a new frame to record a different FP than the second script
+  // would expect.
+  const char* script_1 = "debugger; throw new Error();";
+  RunScriptInANewCFrame(script_1);
+
+  // The second script uses forEach.
+  const char* script_2 = "[0].forEach(function() { });";
+  CompileRun(script_2);
+
+  v8::Debug::SetDebugEventListener(NULL);
+}
+
+
+// Import from test-heap.cc
+int CountNativeContexts();
+
+
+static void NopListener(v8::DebugEvent event,
+                        v8::Handle<v8::Object> exec_state,
+                        v8::Handle<v8::Object> event_data,
+                        v8::Handle<v8::Value> data) {
+}
+
+
+TEST(DebuggerCreatesContextIffActive) {
+  v8::HandleScope scope;
+  DebugLocalContext env;
+  CHECK_EQ(1, CountNativeContexts());
+
+  v8::Debug::SetDebugEventListener(NULL);
+  CompileRun("debugger;");
+  CHECK_EQ(1, CountNativeContexts());
+
+  v8::Debug::SetDebugEventListener(NopListener);
+  CompileRun("debugger;");
+  CHECK_EQ(2, CountNativeContexts());
+
+  v8::Debug::SetDebugEventListener(NULL);
+}
+
+
+TEST(LiveEditEnabled) {
+  v8::internal::FLAG_allow_natives_syntax = true;
+  v8::HandleScope scope;
+  LocalContext context;
+  v8::Debug::SetLiveEditEnabled(true);
+  CompileRun("%LiveEditCompareStrings('', '')");
+}
+
+
+TEST(LiveEditDisabled) {
+  v8::internal::FLAG_allow_natives_syntax = true;
+  v8::HandleScope scope;
+  LocalContext context;
+  v8::Debug::SetLiveEditEnabled(false);
+  CompileRun("%LiveEditCompareStrings('', '')");
 }
 
 

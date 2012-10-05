@@ -19,10 +19,12 @@
  * IN THE SOFTWARE.
  */
 
-#include "uv.h"
-#include "../uv-common.h"
-#include "internal.h"
 #include <assert.h>
+#include <limits.h>
+
+#include "uv.h"
+#include "internal.h"
+
 
 #define HAVE_SRWLOCK_API() (pTryAcquireSRWLockShared != NULL)
 
@@ -58,11 +60,6 @@ static NOINLINE void uv__once_inner(uv_once_t* guard,
     void (*callback)(void)) {
   DWORD result;
   HANDLE existing_event, created_event;
-  HANDLE* event_ptr;
-
-  /* Fetch and align event_ptr */
-  event_ptr = (HANDLE*) (((uintptr_t) &guard->event + (sizeof(HANDLE) - 1)) &
-    ~(sizeof(HANDLE) - 1));
 
   created_event = CreateEvent(NULL, 1, 0, NULL);
   if (created_event == 0) {
@@ -70,7 +67,7 @@ static NOINLINE void uv__once_inner(uv_once_t* guard,
     uv_fatal_error(GetLastError(), "CreateEvent");
   }
 
-  existing_event = InterlockedCompareExchangePointer(event_ptr,
+  existing_event = InterlockedCompareExchangePointer(&guard->event,
                                                      created_event,
                                                      NULL);
 
@@ -203,6 +200,44 @@ void uv_rwlock_wrunlock(uv_rwlock_t* rwlock) {
     uv__rwlock_srwlock_wrunlock(rwlock);
   else
     uv__rwlock_fallback_wrunlock(rwlock);
+}
+
+
+int uv_sem_init(uv_sem_t* sem, unsigned int value) {
+  *sem = CreateSemaphore(NULL, value, INT_MAX, NULL);
+  return *sem ? 0 : -1;
+}
+
+
+void uv_sem_destroy(uv_sem_t* sem) {
+  if (!CloseHandle(*sem))
+    abort();
+}
+
+
+void uv_sem_post(uv_sem_t* sem) {
+  if (!ReleaseSemaphore(*sem, 1, NULL))
+    abort();
+}
+
+
+void uv_sem_wait(uv_sem_t* sem) {
+  if (WaitForSingleObject(*sem, INFINITE) != WAIT_OBJECT_0)
+    abort();
+}
+
+
+int uv_sem_trywait(uv_sem_t* sem) {
+  DWORD r = WaitForSingleObject(*sem, 0);
+
+  if (r == WAIT_OBJECT_0)
+    return 0;
+
+  if (r == WAIT_TIMEOUT)
+    return -1;
+
+  abort();
+  return -1; /* Satisfy the compiler. */
 }
 
 

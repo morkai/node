@@ -44,21 +44,24 @@ class SafepointGenerator;
 class LCodeGen BASE_EMBEDDED {
  public:
   LCodeGen(LChunk* chunk, MacroAssembler* assembler, CompilationInfo* info)
-      : chunk_(chunk),
+      : zone_(info->zone()),
+        chunk_(static_cast<LPlatformChunk*>(chunk)),
         masm_(assembler),
         info_(info),
         current_block_(-1),
         current_instruction_(-1),
         instructions_(chunk->instructions()),
-        deoptimizations_(4),
-        deopt_jump_table_(4),
-        deoptimization_literals_(8),
+        deoptimizations_(4, info->zone()),
+        deopt_jump_table_(4, info->zone()),
+        deoptimization_literals_(8, info->zone()),
         inlined_function_count_(0),
         scope_(info->scope()),
         status_(UNUSED),
-        deferred_(8),
+        translations_(info->zone()),
+        deferred_(8, info->zone()),
         osr_pc_offset_(-1),
         last_lazy_deopt_pc_(0),
+        safepoints_(info->zone()),
         resolver_(this),
         expected_safepoint_kind_(Safepoint::kSimple) {
     PopulateDeoptimizationLiteralsWithInlinedFunctions();
@@ -71,6 +74,7 @@ class LCodeGen BASE_EMBEDDED {
   Isolate* isolate() const { return info_->isolate(); }
   Factory* factory() const { return isolate()->factory(); }
   Heap* heap() const { return isolate()->heap(); }
+  Zone* zone() const { return zone_; }
 
   // Support for converting LOperands to assembler types.
   // LOperand must be a register.
@@ -106,12 +110,19 @@ class LCodeGen BASE_EMBEDDED {
   void FinishCode(Handle<Code> code);
 
   void DoDeferredNumberTagD(LNumberTagD* instr);
-  void DoDeferredNumberTagI(LNumberTagI* instr);
+
+  enum IntegerSignedness { SIGNED_INT32, UNSIGNED_INT32 };
+  void DoDeferredNumberTagI(LInstruction* instr,
+                            LOperand* value,
+                            IntegerSignedness signedness);
+
   void DoDeferredTaggedToI(LTaggedToI* instr);
   void DoDeferredMathAbsTaggedHeapNumber(LUnaryMathOperation* instr);
   void DoDeferredStackCheck(LStackCheck* instr);
+  void DoDeferredRandom(LRandom* instr);
   void DoDeferredStringCharCodeAt(LStringCharCodeAt* instr);
   void DoDeferredStringCharFromCode(LStringCharFromCode* instr);
+  void DoDeferredAllocateObject(LAllocateObject* instr);
   void DoDeferredInstanceOfKnownGlobal(LInstanceOfKnownGlobal* instr,
                                        Label* map_check);
 
@@ -121,6 +132,15 @@ class LCodeGen BASE_EMBEDDED {
   // Parallel move support.
   void DoParallelMove(LParallelMove* move);
   void DoGap(LGap* instr);
+
+  MemOperand PrepareKeyedOperand(Register key,
+                                 Register base,
+                                 bool key_is_constant,
+                                 int constant_key,
+                                 int element_size,
+                                 int shift_size,
+                                 int additional_index,
+                                 int additional_offset);
 
   // Emit frame translation commands for an environment.
   void WriteTranslation(LEnvironment* environment, Translation* translation);
@@ -147,7 +167,7 @@ class LCodeGen BASE_EMBEDDED {
     return info()->is_classic_mode() ? kNonStrictMode : kStrictMode;
   }
 
-  LChunk* chunk() const { return chunk_; }
+  LPlatformChunk* chunk() const { return chunk_; }
   Scope* scope() const { return scope_; }
   HGraph* graph() const { return chunk_->graph(); }
 
@@ -168,10 +188,10 @@ class LCodeGen BASE_EMBEDDED {
   int GetStackSlotCount() const { return chunk()->spill_slot_count(); }
   int GetParameterCount() const { return scope()->num_parameters(); }
 
-  void Abort(const char* format, ...);
+  void Abort(const char* reason);
   void Comment(const char* format, ...);
 
-  void AddDeferredCode(LDeferredCode* code) { deferred_.Add(code); }
+  void AddDeferredCode(LDeferredCode* code) { deferred_.Add(code, zone()); }
 
   // Code generation passes.  Returns true if code generation should
   // continue.
@@ -210,12 +230,18 @@ class LCodeGen BASE_EMBEDDED {
                                int argc,
                                LInstruction* instr);
 
+  enum A1State {
+    A1_UNINITIALIZED,
+    A1_CONTAINS_TARGET
+  };
+
   // Generate a direct call to a known function.  Expects the function
   // to be in a1.
   void CallKnownFunction(Handle<JSFunction> function,
                          int arity,
                          LInstruction* instr,
-                         CallKind call_kind);
+                         CallKind call_kind,
+                         A1State a1_state);
 
   void LoadHeapObject(Register result, Handle<HeapObject> object);
 
@@ -231,7 +257,8 @@ class LCodeGen BASE_EMBEDDED {
 
   void AddToTranslation(Translation* translation,
                         LOperand* op,
-                        bool is_tagged);
+                        bool is_tagged,
+                        bool is_uint32);
   void PopulateDeoptimizationData(Handle<Code> code);
   int DefineDeoptimizationLiteral(Handle<Object> literal);
 
@@ -286,6 +313,10 @@ class LCodeGen BASE_EMBEDDED {
                         bool deoptimize_on_minus_zero,
                         LEnvironment* env);
 
+  void DeoptIfTaggedButNotSmi(LEnvironment* environment,
+                              HValue* value,
+                              LOperand* operand);
+
   // Emits optimized code for typeof x == "y".  Modifies input register.
   // Returns the condition on which a final split to
   // true and false label should be made, to optimize fallthrough.
@@ -321,7 +352,8 @@ class LCodeGen BASE_EMBEDDED {
   void EmitLoadFieldOrConstantFunction(Register result,
                                        Register object,
                                        Handle<Map> type,
-                                       Handle<String> name);
+                                       Handle<String> name,
+                                       LEnvironment* env);
 
   // Emits optimized code to deep-copy the contents of statically known
   // object graphs (e.g. object literal boilerplate).
@@ -340,7 +372,8 @@ class LCodeGen BASE_EMBEDDED {
 
   void EnsureSpaceForLazyDeopt();
 
-  LChunk* const chunk_;
+  Zone* zone_;
+  LPlatformChunk* const chunk_;
   MacroAssembler* const masm_;
   CompilationInfo* const info_;
 

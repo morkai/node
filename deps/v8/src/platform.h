@@ -1,4 +1,4 @@
-// Copyright 2011 the V8 project authors. All rights reserved.
+// Copyright 2012 the V8 project authors. All rights reserved.
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
 // met:
@@ -71,6 +71,24 @@ int signbit(double x);
 
 int strncasecmp(const char* s1, const char* s2, int n);
 
+inline int lrint(double flt) {
+  int intgr;
+#if defined(V8_TARGET_ARCH_IA32)
+  __asm {
+    fld flt
+    fistp intgr
+  };
+#else
+  intgr = static_cast<int>(flt + 0.5);
+  if ((intgr & 1) != 0 && intgr - flt == 0.5) {
+    // If the number is halfway between two integers, round to the even one.
+    intgr--;
+  }
+#endif
+  return intgr;
+}
+
+
 #endif  // _MSC_VER
 
 // Random is missing on both Visual Studio and MinGW.
@@ -79,6 +97,7 @@ int random();
 #endif  // WIN32
 
 #include "atomicops.h"
+#include "lazy-instance.h"
 #include "platform-tls.h"
 #include "utils.h"
 #include "v8globals.h"
@@ -96,6 +115,13 @@ class Mutex;
 double ceiling(double x);
 double modulo(double x, double y);
 
+// Custom implementation of sin, cos, tan and log.
+double fast_sin(double input);
+double fast_cos(double input);
+double fast_tan(double input);
+double fast_log(double input);
+double fast_sqrt(double input);
+
 // Forward declarations.
 class Socket;
 
@@ -110,6 +136,13 @@ class OS {
  public:
   // Initializes the platform OS support. Called once at VM startup.
   static void SetUp();
+
+  // Initializes the platform OS support that depend on CPU features. This is
+  // called after CPU initialization.
+  static void PostSetUp();
+
+  // Clean up platform-OS-related things. Called once at VM shutdown.
+  static void TearDown();
 
   // Returns the accumulated user time for thread. This routine
   // can be used for profiling. The implementation should
@@ -301,6 +334,8 @@ class OS {
   }
   static const int kMinComplexMemCopy = 256;
 #endif  // V8_TARGET_ARCH_IA32
+
+  static int GetCurrentProcessId();
 
  private:
   static const int msPerSecond = 1000;
@@ -522,6 +557,25 @@ class Mutex {
   virtual bool TryLock() = 0;
 };
 
+struct CreateMutexTrait {
+  static Mutex* Create() {
+    return OS::CreateMutex();
+  }
+};
+
+// POD Mutex initialized lazily (i.e. the first time Pointer() is called).
+// Usage:
+//   static LazyMutex my_mutex = LAZY_MUTEX_INITIALIZER;
+//
+//   void my_function() {
+//     ScopedLock my_lock(my_mutex.Pointer());
+//     // Do something.
+//   }
+//
+typedef LazyDynamicInstance<
+    Mutex, CreateMutexTrait, ThreadSafeInitOnceTrait>::type LazyMutex;
+
+#define LAZY_MUTEX_INITIALIZER LAZY_DYNAMIC_INSTANCE_INITIALIZER
 
 // ----------------------------------------------------------------------------
 // ScopedLock
@@ -571,6 +625,31 @@ class Semaphore {
   virtual void Signal() = 0;
 };
 
+template <int InitialValue>
+struct CreateSemaphoreTrait {
+  static Semaphore* Create() {
+    return OS::CreateSemaphore(InitialValue);
+  }
+};
+
+// POD Semaphore initialized lazily (i.e. the first time Pointer() is called).
+// Usage:
+//   // The following semaphore starts at 0.
+//   static LazySemaphore<0>::type my_semaphore = LAZY_SEMAPHORE_INITIALIZER;
+//
+//   void my_function() {
+//     // Do something with my_semaphore.Pointer().
+//   }
+//
+template <int InitialValue>
+struct LazySemaphore {
+  typedef typename LazyDynamicInstance<
+      Semaphore, CreateSemaphoreTrait<InitialValue>,
+      ThreadSafeInitOnceTrait>::type type;
+};
+
+#define LAZY_SEMAPHORE_INITIALIZER LAZY_DYNAMIC_INSTANCE_INITIALIZER
+
 
 // ----------------------------------------------------------------------------
 // Socket
@@ -594,6 +673,7 @@ class Socket {
   virtual bool Shutdown() = 0;
 
   // Data Transimission
+  // Return 0 on failure.
   virtual int Send(const char* data, int len) const = 0;
   virtual int Receive(char* data, int len) const = 0;
 

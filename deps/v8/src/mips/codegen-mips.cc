@@ -37,6 +37,22 @@ namespace internal {
 
 #define __ ACCESS_MASM(masm)
 
+UnaryMathFunction CreateTranscendentalFunction(TranscendentalCache::Type type) {
+  switch (type) {
+    case TranscendentalCache::SIN: return &sin;
+    case TranscendentalCache::COS: return &cos;
+    case TranscendentalCache::TAN: return &tan;
+    case TranscendentalCache::LOG: return &log;
+    default: UNIMPLEMENTED();
+  }
+  return NULL;
+}
+
+
+UnaryMathFunction CreateSqrtFunction() {
+  return &sqrt;
+}
+
 // -------------------------------------------------------------------------
 // Platform-specific RuntimeCallHelper functions.
 
@@ -56,7 +72,7 @@ void StubRuntimeCallHelper::AfterCall(MacroAssembler* masm) const {
 // -------------------------------------------------------------------------
 // Code generators
 
-void ElementsTransitionGenerator::GenerateSmiOnlyToObject(
+void ElementsTransitionGenerator::GenerateMapChangeElementsTransition(
     MacroAssembler* masm) {
   // ----------- S t a t e -------------
   //  -- a0    : value
@@ -79,7 +95,7 @@ void ElementsTransitionGenerator::GenerateSmiOnlyToObject(
 }
 
 
-void ElementsTransitionGenerator::GenerateSmiOnlyToDouble(
+void ElementsTransitionGenerator::GenerateSmiToDouble(
     MacroAssembler* masm, Label* fail) {
   // ----------- S t a t e -------------
   //  -- a0    : value

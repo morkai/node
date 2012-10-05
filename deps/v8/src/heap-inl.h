@@ -32,6 +32,7 @@
 #include "isolate.h"
 #include "list-inl.h"
 #include "objects.h"
+#include "platform.h"
 #include "v8-counters.h"
 #include "store-buffer.h"
 #include "store-buffer-inl.h"
@@ -459,17 +460,20 @@ MaybeObject* Heap::PrepareForCompare(String* str) {
 }
 
 
-int Heap::AdjustAmountOfExternalAllocatedMemory(int change_in_bytes) {
+intptr_t Heap::AdjustAmountOfExternalAllocatedMemory(
+    intptr_t change_in_bytes) {
   ASSERT(HasBeenSetUp());
-  int amount = amount_of_external_allocated_memory_ + change_in_bytes;
+  intptr_t amount = amount_of_external_allocated_memory_ + change_in_bytes;
   if (change_in_bytes >= 0) {
     // Avoid overflow.
     if (amount > amount_of_external_allocated_memory_) {
       amount_of_external_allocated_memory_ = amount;
+    } else {
+      // Give up and reset the counters in case of an overflow.
+      amount_of_external_allocated_memory_ = 0;
+      amount_of_external_allocated_memory_at_last_global_gc_ = 0;
     }
-    int amount_since_last_global_gc =
-        amount_of_external_allocated_memory_ -
-        amount_of_external_allocated_memory_at_last_global_gc_;
+    intptr_t amount_since_last_global_gc = PromotedExternalMemorySize();
     if (amount_since_last_global_gc > external_allocation_limit_) {
       CollectAllGarbage(kNoGCFlags, "external memory allocation limit reached");
     }
@@ -477,7 +481,18 @@ int Heap::AdjustAmountOfExternalAllocatedMemory(int change_in_bytes) {
     // Avoid underflow.
     if (amount >= 0) {
       amount_of_external_allocated_memory_ = amount;
+    } else {
+      // Give up and reset the counters in case of an overflow.
+      amount_of_external_allocated_memory_ = 0;
+      amount_of_external_allocated_memory_at_last_global_gc_ = 0;
     }
+  }
+  if (FLAG_trace_external_memory) {
+    PrintPID("%8.0f ms: ", isolate()->time_millis_since_init());
+    PrintF("Adjust amount of external memory: delta=%6" V8_PTR_PREFIX "d KB, "
+           " amount=%6" V8_PTR_PREFIX "d KB, isolate=0x%08" V8PRIxPTR ".\n",
+           change_in_bytes / 1024, amount_of_external_allocated_memory_ / 1024,
+           reinterpret_cast<intptr_t>(isolate()));
   }
   ASSERT(amount_of_external_allocated_memory_ >= 0);
   return amount_of_external_allocated_memory_;
@@ -593,12 +608,24 @@ void ExternalStringTable::Iterate(ObjectVisitor* v) {
 void ExternalStringTable::Verify() {
 #ifdef DEBUG
   for (int i = 0; i < new_space_strings_.length(); ++i) {
-    ASSERT(heap_->InNewSpace(new_space_strings_[i]));
-    ASSERT(new_space_strings_[i] != HEAP->raw_unchecked_the_hole_value());
+    Object* obj = Object::cast(new_space_strings_[i]);
+    // TODO(yangguo): check that the object is indeed an external string.
+    ASSERT(heap_->InNewSpace(obj));
+    ASSERT(obj != HEAP->raw_unchecked_the_hole_value());
+    if (obj->IsExternalAsciiString()) {
+      ExternalAsciiString* string = ExternalAsciiString::cast(obj);
+      ASSERT(String::IsAscii(string->GetChars(), string->length()));
+    }
   }
   for (int i = 0; i < old_space_strings_.length(); ++i) {
-    ASSERT(!heap_->InNewSpace(old_space_strings_[i]));
-    ASSERT(old_space_strings_[i] != HEAP->raw_unchecked_the_hole_value());
+    Object* obj = Object::cast(old_space_strings_[i]);
+    // TODO(yangguo): check that the object is indeed an external string.
+    ASSERT(!heap_->InNewSpace(obj));
+    ASSERT(obj != HEAP->raw_unchecked_the_hole_value());
+    if (obj->IsExternalAsciiString()) {
+      ExternalAsciiString* string = ExternalAsciiString::cast(obj);
+      ASSERT(String::IsAscii(string->GetChars(), string->length()));
+    }
   }
 #endif
 }
@@ -658,15 +685,15 @@ double TranscendentalCache::SubCache::Calculate(double input) {
     case ATAN:
       return atan(input);
     case COS:
-      return cos(input);
+      return fast_cos(input);
     case EXP:
       return exp(input);
     case LOG:
-      return log(input);
+      return fast_log(input);
     case SIN:
-      return sin(input);
+      return fast_sin(input);
     case TAN:
-      return tan(input);
+      return fast_tan(input);
     default:
       return 0.0;  // Never happens.
   }
@@ -743,37 +770,47 @@ double GCTracer::SizeOfHeapObjects() {
 }
 
 
-#ifdef DEBUG
 DisallowAllocationFailure::DisallowAllocationFailure() {
+#ifdef DEBUG
   old_state_ = HEAP->disallow_allocation_failure_;
   HEAP->disallow_allocation_failure_ = true;
+#endif
 }
 
 
 DisallowAllocationFailure::~DisallowAllocationFailure() {
+#ifdef DEBUG
   HEAP->disallow_allocation_failure_ = old_state_;
-}
 #endif
+}
 
 
 #ifdef DEBUG
 AssertNoAllocation::AssertNoAllocation() {
-  old_state_ = HEAP->allow_allocation(false);
+  Isolate* isolate = ISOLATE;
+  active_ = !isolate->optimizing_compiler_thread()->IsOptimizerThread();
+  if (active_) {
+    old_state_ = isolate->heap()->allow_allocation(false);
+  }
 }
 
 
 AssertNoAllocation::~AssertNoAllocation() {
-  HEAP->allow_allocation(old_state_);
+  if (active_) HEAP->allow_allocation(old_state_);
 }
 
 
 DisableAssertNoAllocation::DisableAssertNoAllocation() {
-  old_state_ = HEAP->allow_allocation(true);
+  Isolate* isolate = ISOLATE;
+  active_ = !isolate->optimizing_compiler_thread()->IsOptimizerThread();
+  if (active_) {
+    old_state_ = isolate->heap()->allow_allocation(true);
+  }
 }
 
 
 DisableAssertNoAllocation::~DisableAssertNoAllocation() {
-  HEAP->allow_allocation(old_state_);
+  if (active_) HEAP->allow_allocation(old_state_);
 }
 
 #else

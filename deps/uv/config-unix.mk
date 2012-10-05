@@ -21,55 +21,69 @@
 E=
 CSTDFLAG=--std=c89 -pedantic -Wall -Wextra -Wno-unused-parameter
 CFLAGS += -g
-CPPFLAGS += -Isrc/unix/ev
+CPPFLAGS += -Isrc -Isrc/unix/ev
 LINKFLAGS=-lm
 
 CPPFLAGS += -D_LARGEFILE_SOURCE
 CPPFLAGS += -D_FILE_OFFSET_BITS=64
 
+OBJS += src/unix/async.o
 OBJS += src/unix/core.o
 OBJS += src/unix/dl.o
-OBJS += src/unix/fs.o
-OBJS += src/unix/cares.o
-OBJS += src/unix/udp.o
 OBJS += src/unix/error.o
-OBJS += src/unix/thread.o
-OBJS += src/unix/process.o
-OBJS += src/unix/tcp.o
+OBJS += src/unix/fs.o
+OBJS += src/unix/loop.o
+OBJS += src/unix/loop-watcher.o
 OBJS += src/unix/pipe.o
-OBJS += src/unix/tty.o
+OBJS += src/unix/poll.o
+OBJS += src/unix/process.o
+OBJS += src/unix/signal.o
 OBJS += src/unix/stream.o
+OBJS += src/unix/tcp.o
+OBJS += src/unix/thread.o
+OBJS += src/unix/timer.o
+OBJS += src/unix/tty.o
+OBJS += src/unix/udp.o
 
 ifeq (SunOS,$(uname_S))
 EV_CONFIG=config_sunos.h
 EIO_CONFIG=config_sunos.h
-CPPFLAGS += -Isrc/ares/config_sunos -D__EXTENSIONS__ -D_XOPEN_SOURCE=500
+CPPFLAGS += -D__EXTENSIONS__ -D_XOPEN_SOURCE=500
 LINKFLAGS+=-lsocket -lnsl -lkstat
 OBJS += src/unix/sunos.o
+endif
+
+ifeq (AIX,$(uname_S))
+EV_CONFIG=config_aix.h
+EIO_CONFIG=config_aix.h
+CPPFLAGS += -Isrc/ares/config_aix -D_ALL_SOURCE -D_XOPEN_SOURCE=500
+LINKFLAGS+= -lperfstat
+OBJS += src/unix/aix.o
 endif
 
 ifeq (Darwin,$(uname_S))
 EV_CONFIG=config_darwin.h
 EIO_CONFIG=config_darwin.h
-CPPFLAGS += -Isrc/ares/config_darwin
+CPPFLAGS += -D_DARWIN_USE_64_BIT_INODE=1
 LINKFLAGS+=-framework CoreServices
 OBJS += src/unix/darwin.o
 OBJS += src/unix/kqueue.o
+OBJS += src/unix/fsevents.o
 endif
 
 ifeq (Linux,$(uname_S))
 EV_CONFIG=config_linux.h
 EIO_CONFIG=config_linux.h
 CSTDFLAG += -D_GNU_SOURCE
-CPPFLAGS += -Isrc/ares/config_linux
 LINKFLAGS+=-ldl -lrt
-OBJS += src/unix/linux/core.o src/unix/linux/inotify.o
+OBJS += src/unix/linux/linux-core.o \
+        src/unix/linux/inotify.o    \
+        src/unix/linux/syscalls.o
 endif
 
 ifeq (FreeBSD,$(uname_S))
 EV_CONFIG=config_freebsd.h
 EIO_CONFIG=config_freebsd.h
-CPPFLAGS += -Isrc/ares/config_freebsd
 LINKFLAGS+=-lkvm
 OBJS += src/unix/freebsd.o
 OBJS += src/unix/kqueue.o
@@ -78,7 +92,6 @@ endif
 ifeq (DragonFly,$(uname_S))
 EV_CONFIG=config_freebsd.h
 EIO_CONFIG=config_freebsd.h
-CPPFLAGS += -Isrc/ares/config_freebsd
 LINKFLAGS+=
 OBJS += src/unix/freebsd.o
 OBJS += src/unix/kqueue.o
@@ -87,8 +100,7 @@ endif
 ifeq (NetBSD,$(uname_S))
 EV_CONFIG=config_netbsd.h
 EIO_CONFIG=config_netbsd.h
-CPPFLAGS += -Isrc/ares/config_netbsd
-LINKFLAGS+=
+LINKFLAGS+=-lkvm
 OBJS += src/unix/netbsd.o
 OBJS += src/unix/kqueue.o
 endif
@@ -96,8 +108,7 @@ endif
 ifeq (OpenBSD,$(uname_S))
 EV_CONFIG=config_openbsd.h
 EIO_CONFIG=config_openbsd.h
-CPPFLAGS += -Isrc/ares/config_openbsd
-LINKFLAGS+=
+LINKFLAGS+=-lkvm
 OBJS += src/unix/openbsd.o
 OBJS += src/unix/kqueue.o
 endif
@@ -107,7 +118,6 @@ EV_CONFIG=config_cygwin.h
 EIO_CONFIG=config_cygwin.h
 # We drop the --std=c89, it hides CLOCK_MONOTONIC on cygwin
 CSTDFLAG = -D_GNU_SOURCE
-CPPFLAGS += -Isrc/ares/config_cygwin
 LINKFLAGS+=
 OBJS += src/unix/cygwin.o
 endif
@@ -125,14 +135,14 @@ endif
 RUNNER_LIBS=
 RUNNER_SRC=test/runner-unix.c
 
-uv.a: $(OBJS) src/uv-common.o src/unix/ev/ev.o src/unix/uv-eio.o src/unix/eio/eio.o $(CARES_OBJS)
-	$(AR) rcs uv.a $(OBJS) src/uv-common.o src/unix/uv-eio.o src/unix/ev/ev.o src/unix/eio/eio.o $(CARES_OBJS)
+uv.a: $(OBJS) src/fs-poll.o src/inet.o src/uv-common.o src/unix/ev/ev.o src/unix/uv-eio.o src/unix/eio/eio.o
+	$(AR) rcs uv.a $^
+
+src/%.o: src/%.c include/uv.h include/uv-private/uv-unix.h
+	$(CC) $(CSTDFLAG) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 src/unix/%.o: src/unix/%.c include/uv.h include/uv-private/uv-unix.h src/unix/internal.h
-	$(CC) $(CSTDFLAG) $(CPPFLAGS) -Isrc  $(CFLAGS) -c $< -o $@
-
-src/uv-common.o: src/uv-common.c include/uv.h include/uv-private/uv-unix.h
-	$(CC) $(CSTDFLAG) $(CPPFLAGS) $(CFLAGS) -c src/uv-common.c -o src/uv-common.o
+	$(CC) $(CSTDFLAG) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 src/unix/ev/ev.o: src/unix/ev/ev.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c src/unix/ev/ev.c -o src/unix/ev/ev.o -DEV_CONFIG_H=\"$(EV_CONFIG)\"
@@ -151,15 +161,15 @@ src/unix/uv-eio.o: src/unix/uv-eio.c
 
 
 clean-platform:
-	-rm -f src/ares/*.o
+	-rm -f src/unix/*.o
 	-rm -f src/unix/ev/*.o
 	-rm -f src/unix/eio/*.o
-	-rm -f src/unix/*.o
+	-rm -f src/unix/linux/*.o
 	-rm -rf test/run-tests.dSYM run-benchmarks.dSYM
 
 distclean-platform:
-	-rm -f src/ares/*.o
-	-rm -f src/unix/ev/*.o
 	-rm -f src/unix/*.o
+	-rm -f src/unix/ev/*.o
 	-rm -f src/unix/eio/*.o
+	-rm -f src/unix/linux/*.o
 	-rm -rf test/run-tests.dSYM run-benchmarks.dSYM

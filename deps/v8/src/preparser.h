@@ -65,7 +65,7 @@ class DuplicateFinder {
         map_(&Match) { }
 
   int AddAsciiSymbol(i::Vector<const char> key, int value);
-  int AddUC16Symbol(i::Vector<const uint16_t> key, int value);
+  int AddUtf16Symbol(i::Vector<const uint16_t> key, int value);
   // Add a a number literal by converting it (if necessary)
   // to the string that ToString(ToNumber(literal)) would generate.
   // and then adding that string with AddAsciiSymbol.
@@ -470,8 +470,19 @@ class PreParser {
     void set_language_mode(i::LanguageMode language_mode) {
       language_mode_ = language_mode;
     }
-    void EnterWith() { with_nesting_count_++; }
-    void LeaveWith() { with_nesting_count_--; }
+
+    class InsideWith {
+     public:
+      explicit InsideWith(Scope* scope) : scope_(scope) {
+        scope->with_nesting_count_++;
+      }
+
+      ~InsideWith() { scope_->with_nesting_count_--; }
+
+     private:
+      Scope* scope_;
+      DISALLOW_COPY_AND_ASSIGN(InsideWith);
+    };
 
    private:
     Scope** const variable_;

@@ -50,6 +50,10 @@ void Deoptimizer::DeoptimizeFunction(JSFunction* function) {
 
   if (!function->IsOptimized()) return;
 
+  // The optimized code is going to be patched, so we cannot use it
+  // any more.  Play safe and reset the whole cache.
+  function->shared()->ClearOptimizedCodeMap();
+
   // Get the optimized code.
   Code* code = function->code();
   Address code_start_address = code->instruction_start();
@@ -69,8 +73,11 @@ void Deoptimizer::DeoptimizeFunction(JSFunction* function) {
     if (deopt_data->Pc(i)->value() == -1) continue;
     Address call_address = code_start_address + deopt_data->Pc(i)->value();
     Address deopt_entry = GetDeoptimizationEntry(i, LAZY);
-    int call_size_in_bytes = MacroAssembler::CallSize(deopt_entry,
-                                                      RelocInfo::NONE);
+    // We need calls to have a predictable size in the unoptimized code, but
+    // this is optimized code, so we don't have to have a predictable size.
+    int call_size_in_bytes =
+        MacroAssembler::CallSizeNotPredictableCodeSize(deopt_entry,
+                                                       RelocInfo::NONE);
     int call_size_in_words = call_size_in_bytes / Assembler::kInstrSize;
     ASSERT(call_size_in_bytes % Assembler::kInstrSize == 0);
     ASSERT(call_size_in_bytes <= patch_size());
@@ -97,8 +104,19 @@ void Deoptimizer::DeoptimizeFunction(JSFunction* function) {
   // ignore all slots that might have been recorded on it.
   isolate->heap()->mark_compact_collector()->InvalidateCode(code);
 
-  // Set the code for the function to non-optimized version.
-  function->ReplaceCode(function->shared()->code());
+  // Iterate over all the functions which share the same code object
+  // and make them use unoptimized version.
+  Context* context = function->context()->native_context();
+  Object* element = context->get(Context::OPTIMIZED_FUNCTIONS_LIST);
+  SharedFunctionInfo* shared = function->shared();
+  while (!element->IsUndefined()) {
+    JSFunction* func = JSFunction::cast(element);
+    // Grab element before code replacement as ReplaceCode alters the list.
+    element = func->next_function_link();
+    if (func->code() == code) {
+      func->ReplaceCode(shared->code());
+    }
+  }
 
   if (FLAG_trace_deopt) {
     PrintF("[forced deoptimization: ");
@@ -106,6 +124,10 @@ void Deoptimizer::DeoptimizeFunction(JSFunction* function) {
     PrintF(" / %x]\n", reinterpret_cast<uint32_t>(function));
   }
 }
+
+
+static const int32_t kBranchBeforeStackCheck = 0x2a000001;
+static const int32_t kBranchBeforeInterrupt =  0x5a000004;
 
 
 void Deoptimizer::PatchStackCheckCodeAt(Code* unoptimized_code,
@@ -118,10 +140,16 @@ void Deoptimizer::PatchStackCheckCodeAt(Code* unoptimized_code,
   //  2a 00 00 01       bcs ok
   //  e5 9f c? ??       ldr ip, [pc, <stack guard address>]
   //  e1 2f ff 3c       blx ip
-  ASSERT(Memory::int32_at(pc_after - kInstrSize) ==
-      (al | B24 | B21 | 15*B16 | 15*B12 | 15*B8 | BLX | ip.code()));
+  ASSERT(Memory::int32_at(pc_after - kInstrSize) == kBlxIp);
   ASSERT(Assembler::IsLdrPcImmediateOffset(
       Assembler::instr_at(pc_after - 2 * kInstrSize)));
+  if (FLAG_count_based_interrupts) {
+    ASSERT_EQ(kBranchBeforeInterrupt,
+              Memory::int32_at(pc_after - 3 * kInstrSize));
+  } else {
+    ASSERT_EQ(kBranchBeforeStackCheck,
+              Memory::int32_at(pc_after - 3 * kInstrSize));
+  }
 
   // We patch the code to the following form:
   //  e1 5d 00 0c       cmp sp, <limit>
@@ -155,13 +183,21 @@ void Deoptimizer::RevertStackCheckCodeAt(Code* unoptimized_code,
                                          Code* check_code,
                                          Code* replacement_code) {
   const int kInstrSize = Assembler::kInstrSize;
-  ASSERT(Memory::uint32_at(pc_after - kInstrSize) == 0xe12fff3c);
-  ASSERT(Memory::uint8_at(pc_after - kInstrSize - 1) == 0xe5);
-  ASSERT(Memory::uint8_at(pc_after - kInstrSize - 2) == 0x9f);
+  ASSERT(Memory::int32_at(pc_after - kInstrSize) == kBlxIp);
+  ASSERT(Assembler::IsLdrPcImmediateOffset(
+      Assembler::instr_at(pc_after - 2 * kInstrSize)));
 
   // Replace NOP with conditional jump.
   CodePatcher patcher(pc_after - 3 * kInstrSize, 1);
-  patcher.masm()->b(+4, cs);
+  if (FLAG_count_based_interrupts) {
+    patcher.masm()->b(+16, pl);
+    ASSERT_EQ(kBranchBeforeInterrupt,
+              Memory::int32_at(pc_after - 3 * kInstrSize));
+  } else {
+    patcher.masm()->b(+4, cs);
+    ASSERT_EQ(kBranchBeforeStackCheck,
+              Memory::int32_at(pc_after - 3 * kInstrSize));
+  }
 
   // Replace the stack check address in the constant pool
   // with the entry address of the replacement code.
@@ -178,11 +214,11 @@ void Deoptimizer::RevertStackCheckCodeAt(Code* unoptimized_code,
 }
 
 
-static int LookupBailoutId(DeoptimizationInputData* data, unsigned ast_id) {
+static int LookupBailoutId(DeoptimizationInputData* data, BailoutId ast_id) {
   ByteArray* translations = data->TranslationByteArray();
   int length = data->DeoptCount();
   for (int i = 0; i < length; i++) {
-    if (static_cast<unsigned>(data->AstId(i)->value()) == ast_id) {
+    if (data->AstId(i) == ast_id) {
       TranslationIterator it(translations,  data->TranslationIndex(i)->value());
       int value = it.Next();
       ASSERT(Translation::BEGIN == static_cast<Translation::Opcode>(value));
@@ -201,7 +237,7 @@ void Deoptimizer::DoComputeOsrOutputFrame() {
       optimized_code_->deoptimization_data());
   unsigned ast_id = data->OsrAstId()->value();
 
-  int bailout_id = LookupBailoutId(data, ast_id);
+  int bailout_id = LookupBailoutId(data, BailoutId(ast_id));
   unsigned translation_index = data->TranslationIndex(bailout_id)->value();
   ByteArray* translations = data->TranslationByteArray();
 
@@ -221,9 +257,9 @@ void Deoptimizer::DoComputeOsrOutputFrame() {
   unsigned node_id = iterator.Next();
   USE(node_id);
   ASSERT(node_id == ast_id);
-  JSFunction* function = JSFunction::cast(ComputeLiteral(iterator.Next()));
-  USE(function);
-  ASSERT(function == function_);
+  int closure_id = iterator.Next();
+  USE(closure_id);
+  ASSERT_EQ(Translation::kSelfLiteralId, closure_id);
   unsigned height = iterator.Next();
   unsigned height_in_bytes = height * kPointerSize;
   USE(height_in_bytes);
@@ -334,8 +370,8 @@ void Deoptimizer::DoComputeOsrOutputFrame() {
   if (FLAG_trace_osr) {
     PrintF("[on-stack replacement translation %s: 0x%08" V8PRIxPTR " ",
            ok ? "finished" : "aborted",
-           reinterpret_cast<intptr_t>(function));
-    function->PrintName();
+           reinterpret_cast<intptr_t>(function_));
+    function_->PrintName();
     PrintF(" => pc=0x%0x]\n", output_[0]->GetPc());
   }
 }
@@ -351,7 +387,6 @@ void Deoptimizer::DoComputeArgumentsAdaptorFrame(TranslationIterator* iterator,
   }
 
   unsigned fixed_frame_size = ArgumentsAdaptorFrameConstants::kFrameSize;
-  unsigned input_frame_size = input_->GetFrameSize();
   unsigned output_frame_size = height_in_bytes + fixed_frame_size;
 
   // Allocate and store the output frame description.
@@ -373,16 +408,13 @@ void Deoptimizer::DoComputeArgumentsAdaptorFrame(TranslationIterator* iterator,
   // Compute the incoming parameter translation.
   int parameter_count = height;
   unsigned output_offset = output_frame_size;
-  unsigned input_offset = input_frame_size;
   for (int i = 0; i < parameter_count; ++i) {
     output_offset -= kPointerSize;
     DoTranslateCommand(iterator, frame_index, output_offset);
   }
-  input_offset -= (parameter_count * kPointerSize);
 
   // Read caller's PC from the previous frame.
   output_offset -= kPointerSize;
-  input_offset -= kPointerSize;
   intptr_t callers_pc = output_[frame_index - 1]->GetPc();
   output_frame->SetFrameSlot(output_offset, callers_pc);
   if (FLAG_trace_deopt) {
@@ -392,7 +424,6 @@ void Deoptimizer::DoComputeArgumentsAdaptorFrame(TranslationIterator* iterator,
 
   // Read caller's FP from the previous frame, and set this frame's FP.
   output_offset -= kPointerSize;
-  input_offset -= kPointerSize;
   intptr_t value = output_[frame_index - 1]->GetFp();
   output_frame->SetFrameSlot(output_offset, value);
   intptr_t fp_value = top_address + output_offset;
@@ -404,7 +435,6 @@ void Deoptimizer::DoComputeArgumentsAdaptorFrame(TranslationIterator* iterator,
 
   // A marker value is used in place of the context.
   output_offset -= kPointerSize;
-  input_offset -= kPointerSize;
   intptr_t context = reinterpret_cast<intptr_t>(
       Smi::FromInt(StackFrame::ARGUMENTS_ADAPTOR));
   output_frame->SetFrameSlot(output_offset, context);
@@ -415,7 +445,6 @@ void Deoptimizer::DoComputeArgumentsAdaptorFrame(TranslationIterator* iterator,
 
   // The function was mentioned explicitly in the ARGUMENTS_ADAPTOR_FRAME.
   output_offset -= kPointerSize;
-  input_offset -= kPointerSize;
   value = reinterpret_cast<intptr_t>(function);
   output_frame->SetFrameSlot(output_offset, value);
   if (FLAG_trace_deopt) {
@@ -425,7 +454,6 @@ void Deoptimizer::DoComputeArgumentsAdaptorFrame(TranslationIterator* iterator,
 
   // Number of incoming arguments.
   output_offset -= kPointerSize;
-  input_offset -= kPointerSize;
   value = reinterpret_cast<uint32_t>(Smi::FromInt(height - 1));
   output_frame->SetFrameSlot(output_offset, value);
   if (FLAG_trace_deopt) {
@@ -445,19 +473,267 @@ void Deoptimizer::DoComputeArgumentsAdaptorFrame(TranslationIterator* iterator,
 }
 
 
+void Deoptimizer::DoComputeConstructStubFrame(TranslationIterator* iterator,
+                                              int frame_index) {
+  Builtins* builtins = isolate_->builtins();
+  Code* construct_stub = builtins->builtin(Builtins::kJSConstructStubGeneric);
+  JSFunction* function = JSFunction::cast(ComputeLiteral(iterator->Next()));
+  unsigned height = iterator->Next();
+  unsigned height_in_bytes = height * kPointerSize;
+  if (FLAG_trace_deopt) {
+    PrintF("  translating construct stub => height=%d\n", height_in_bytes);
+  }
+
+  unsigned fixed_frame_size = 8 * kPointerSize;
+  unsigned output_frame_size = height_in_bytes + fixed_frame_size;
+
+  // Allocate and store the output frame description.
+  FrameDescription* output_frame =
+      new(output_frame_size) FrameDescription(output_frame_size, function);
+  output_frame->SetFrameType(StackFrame::CONSTRUCT);
+
+  // Construct stub can not be topmost or bottommost.
+  ASSERT(frame_index > 0 && frame_index < output_count_ - 1);
+  ASSERT(output_[frame_index] == NULL);
+  output_[frame_index] = output_frame;
+
+  // The top address of the frame is computed from the previous
+  // frame's top and this frame's size.
+  uint32_t top_address;
+  top_address = output_[frame_index - 1]->GetTop() - output_frame_size;
+  output_frame->SetTop(top_address);
+
+  // Compute the incoming parameter translation.
+  int parameter_count = height;
+  unsigned output_offset = output_frame_size;
+  for (int i = 0; i < parameter_count; ++i) {
+    output_offset -= kPointerSize;
+    DoTranslateCommand(iterator, frame_index, output_offset);
+  }
+
+  // Read caller's PC from the previous frame.
+  output_offset -= kPointerSize;
+  intptr_t callers_pc = output_[frame_index - 1]->GetPc();
+  output_frame->SetFrameSlot(output_offset, callers_pc);
+  if (FLAG_trace_deopt) {
+    PrintF("    0x%08x: [top + %d] <- 0x%08x ; caller's pc\n",
+           top_address + output_offset, output_offset, callers_pc);
+  }
+
+  // Read caller's FP from the previous frame, and set this frame's FP.
+  output_offset -= kPointerSize;
+  intptr_t value = output_[frame_index - 1]->GetFp();
+  output_frame->SetFrameSlot(output_offset, value);
+  intptr_t fp_value = top_address + output_offset;
+  output_frame->SetFp(fp_value);
+  if (FLAG_trace_deopt) {
+    PrintF("    0x%08x: [top + %d] <- 0x%08x ; caller's fp\n",
+           fp_value, output_offset, value);
+  }
+
+  // The context can be gotten from the previous frame.
+  output_offset -= kPointerSize;
+  value = output_[frame_index - 1]->GetContext();
+  output_frame->SetFrameSlot(output_offset, value);
+  if (FLAG_trace_deopt) {
+    PrintF("    0x%08x: [top + %d] <- 0x%08x ; context\n",
+           top_address + output_offset, output_offset, value);
+  }
+
+  // A marker value is used in place of the function.
+  output_offset -= kPointerSize;
+  value = reinterpret_cast<intptr_t>(Smi::FromInt(StackFrame::CONSTRUCT));
+  output_frame->SetFrameSlot(output_offset, value);
+  if (FLAG_trace_deopt) {
+    PrintF("    0x%08x: [top + %d] <- 0x%08x ; function (construct sentinel)\n",
+           top_address + output_offset, output_offset, value);
+  }
+
+  // The output frame reflects a JSConstructStubGeneric frame.
+  output_offset -= kPointerSize;
+  value = reinterpret_cast<intptr_t>(construct_stub);
+  output_frame->SetFrameSlot(output_offset, value);
+  if (FLAG_trace_deopt) {
+    PrintF("    0x%08x: [top + %d] <- 0x%08x ; code object\n",
+           top_address + output_offset, output_offset, value);
+  }
+
+  // Number of incoming arguments.
+  output_offset -= kPointerSize;
+  value = reinterpret_cast<uint32_t>(Smi::FromInt(height - 1));
+  output_frame->SetFrameSlot(output_offset, value);
+  if (FLAG_trace_deopt) {
+    PrintF("    0x%08x: [top + %d] <- 0x%08x ; argc (%d)\n",
+           top_address + output_offset, output_offset, value, height - 1);
+  }
+
+  // Constructor function being invoked by the stub.
+  output_offset -= kPointerSize;
+  value = reinterpret_cast<intptr_t>(function);
+  output_frame->SetFrameSlot(output_offset, value);
+  if (FLAG_trace_deopt) {
+    PrintF("    0x%08x: [top + %d] <- 0x%08x ; constructor function\n",
+           top_address + output_offset, output_offset, value);
+  }
+
+  // The newly allocated object was passed as receiver in the artificial
+  // constructor stub environment created by HEnvironment::CopyForInlining().
+  output_offset -= kPointerSize;
+  value = output_frame->GetFrameSlot(output_frame_size - kPointerSize);
+  output_frame->SetFrameSlot(output_offset, value);
+  if (FLAG_trace_deopt) {
+    PrintF("    0x%08x: [top + %d] <- 0x%08x ; allocated receiver\n",
+           top_address + output_offset, output_offset, value);
+  }
+
+  ASSERT(0 == output_offset);
+
+  uint32_t pc = reinterpret_cast<uint32_t>(
+      construct_stub->instruction_start() +
+      isolate_->heap()->construct_stub_deopt_pc_offset()->value());
+  output_frame->SetPc(pc);
+}
+
+
+void Deoptimizer::DoComputeAccessorStubFrame(TranslationIterator* iterator,
+                                             int frame_index,
+                                             bool is_setter_stub_frame) {
+  JSFunction* accessor = JSFunction::cast(ComputeLiteral(iterator->Next()));
+  // The receiver (and the implicit return value, if any) are expected in
+  // registers by the LoadIC/StoreIC, so they don't belong to the output stack
+  // frame. This means that we have to use a height of 0.
+  unsigned height = 0;
+  unsigned height_in_bytes = height * kPointerSize;
+  const char* kind = is_setter_stub_frame ? "setter" : "getter";
+  if (FLAG_trace_deopt) {
+    PrintF("  translating %s stub => height=%u\n", kind, height_in_bytes);
+  }
+
+  // We need 5 stack entries from StackFrame::INTERNAL (lr, fp, cp, frame type,
+  // code object, see MacroAssembler::EnterFrame). For a setter stub frames we
+  // need one additional entry for the implicit return value, see
+  // StoreStubCompiler::CompileStoreViaSetter.
+  unsigned fixed_frame_entries = 5 + (is_setter_stub_frame ? 1 : 0);
+  unsigned fixed_frame_size = fixed_frame_entries * kPointerSize;
+  unsigned output_frame_size = height_in_bytes + fixed_frame_size;
+
+  // Allocate and store the output frame description.
+  FrameDescription* output_frame =
+      new(output_frame_size) FrameDescription(output_frame_size, accessor);
+  output_frame->SetFrameType(StackFrame::INTERNAL);
+
+  // A frame for an accessor stub can not be the topmost or bottommost one.
+  ASSERT(frame_index > 0 && frame_index < output_count_ - 1);
+  ASSERT(output_[frame_index] == NULL);
+  output_[frame_index] = output_frame;
+
+  // The top address of the frame is computed from the previous frame's top and
+  // this frame's size.
+  uint32_t top_address = output_[frame_index - 1]->GetTop() - output_frame_size;
+  output_frame->SetTop(top_address);
+
+  unsigned output_offset = output_frame_size;
+
+  // Read caller's PC from the previous frame.
+  output_offset -= kPointerSize;
+  intptr_t callers_pc = output_[frame_index - 1]->GetPc();
+  output_frame->SetFrameSlot(output_offset, callers_pc);
+  if (FLAG_trace_deopt) {
+    PrintF("    0x%08" V8PRIxPTR ": [top + %u] <- 0x%08" V8PRIxPTR
+           " ; caller's pc\n",
+           top_address + output_offset, output_offset, callers_pc);
+  }
+
+  // Read caller's FP from the previous frame, and set this frame's FP.
+  output_offset -= kPointerSize;
+  intptr_t value = output_[frame_index - 1]->GetFp();
+  output_frame->SetFrameSlot(output_offset, value);
+  intptr_t fp_value = top_address + output_offset;
+  output_frame->SetFp(fp_value);
+  if (FLAG_trace_deopt) {
+    PrintF("    0x%08" V8PRIxPTR ": [top + %u] <- 0x%08" V8PRIxPTR
+           " ; caller's fp\n",
+           fp_value, output_offset, value);
+  }
+
+  // The context can be gotten from the previous frame.
+  output_offset -= kPointerSize;
+  value = output_[frame_index - 1]->GetContext();
+  output_frame->SetFrameSlot(output_offset, value);
+  if (FLAG_trace_deopt) {
+    PrintF("    0x%08" V8PRIxPTR ": [top + %u] <- 0x%08" V8PRIxPTR
+           " ; context\n",
+           top_address + output_offset, output_offset, value);
+  }
+
+  // A marker value is used in place of the function.
+  output_offset -= kPointerSize;
+  value = reinterpret_cast<intptr_t>(Smi::FromInt(StackFrame::INTERNAL));
+  output_frame->SetFrameSlot(output_offset, value);
+  if (FLAG_trace_deopt) {
+    PrintF("    0x%08" V8PRIxPTR ": [top + %u] <- 0x%08" V8PRIxPTR
+           " ; function (%s sentinel)\n",
+           top_address + output_offset, output_offset, value, kind);
+  }
+
+  // Get Code object from accessor stub.
+  output_offset -= kPointerSize;
+  Builtins::Name name = is_setter_stub_frame ?
+      Builtins::kStoreIC_Setter_ForDeopt :
+      Builtins::kLoadIC_Getter_ForDeopt;
+  Code* accessor_stub = isolate_->builtins()->builtin(name);
+  value = reinterpret_cast<intptr_t>(accessor_stub);
+  output_frame->SetFrameSlot(output_offset, value);
+  if (FLAG_trace_deopt) {
+    PrintF("    0x%08" V8PRIxPTR ": [top + %u] <- 0x%08" V8PRIxPTR
+           " ; code object\n",
+           top_address + output_offset, output_offset, value);
+  }
+
+  // Skip receiver.
+  Translation::Opcode opcode =
+      static_cast<Translation::Opcode>(iterator->Next());
+  iterator->Skip(Translation::NumberOfOperandsFor(opcode));
+
+  if (is_setter_stub_frame) {
+    // The implicit return value was part of the artificial setter stub
+    // environment.
+    output_offset -= kPointerSize;
+    DoTranslateCommand(iterator, frame_index, output_offset);
+  }
+
+  ASSERT(0 == output_offset);
+
+  Smi* offset = is_setter_stub_frame ?
+      isolate_->heap()->setter_stub_deopt_pc_offset() :
+      isolate_->heap()->getter_stub_deopt_pc_offset();
+  intptr_t pc = reinterpret_cast<intptr_t>(
+      accessor_stub->instruction_start() + offset->value());
+  output_frame->SetPc(pc);
+}
+
+
 // This code is very similar to ia32 code, but relies on register names (fp, sp)
 // and how the frame is laid out.
 void Deoptimizer::DoComputeJSFrame(TranslationIterator* iterator,
                                    int frame_index) {
   // Read the ast node id, function, and frame height for this output frame.
-  int node_id = iterator->Next();
-  JSFunction* function = JSFunction::cast(ComputeLiteral(iterator->Next()));
+  BailoutId node_id = BailoutId(iterator->Next());
+  JSFunction* function;
+  if (frame_index != 0) {
+    function = JSFunction::cast(ComputeLiteral(iterator->Next()));
+  } else {
+    int closure_id = iterator->Next();
+    USE(closure_id);
+    ASSERT_EQ(Translation::kSelfLiteralId, closure_id);
+    function = function_;
+  }
   unsigned height = iterator->Next();
   unsigned height_in_bytes = height * kPointerSize;
   if (FLAG_trace_deopt) {
     PrintF("  translating ");
     function->PrintName();
-    PrintF(" => node=%d, height=%d\n", node_id, height_in_bytes);
+    PrintF(" => node=%d, height=%d\n", node_id.ToInt(), height_in_bytes);
   }
 
   // The 'fixed' part of the frame consists of the incoming parameters and
@@ -557,9 +833,8 @@ void Deoptimizer::DoComputeJSFrame(TranslationIterator* iterator,
     value = reinterpret_cast<intptr_t>(function->context());
   }
   output_frame->SetFrameSlot(output_offset, value);
-  if (is_topmost) {
-    output_frame->SetRegister(cp.code(), value);
-  }
+  output_frame->SetContext(value);
+  if (is_topmost) output_frame->SetRegister(cp.code(), value);
   if (FLAG_trace_deopt) {
     PrintF("    0x%08x: [top + %d] <- 0x%08x ; context\n",
            top_address + output_offset, output_offset, value);

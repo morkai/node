@@ -30,7 +30,7 @@
 
 // The original source code covered by the above license above has been
 // modified significantly by Google Inc.
-// Copyright 2011 the V8 project authors. All rights reserved.
+// Copyright 2012 the V8 project authors. All rights reserved.
 
 
 #include "v8.h"
@@ -143,7 +143,7 @@ int ToNumber(Register reg) {
     27,   // k1
     28,   // gp
     29,   // sp
-    30,   // s8_fp
+    30,   // fp
     31,   // ra
   };
   return kNumbers[reg.code()];
@@ -163,7 +163,7 @@ Register ToRegister(int num) {
     k0, k1,
     gp,
     sp,
-    s8_fp,
+    fp,
     ra
   };
   return kRegisters[num];
@@ -237,28 +237,28 @@ MemOperand::MemOperand(Register rm, int32_t offset) : Operand(rm) {
 static const int kNegOffset = 0x00008000;
 // addiu(sp, sp, 4) aka Pop() operation or part of Pop(r)
 // operations as post-increment of sp.
-const Instr kPopInstruction = ADDIU | (sp.code() << kRsShift)
-      | (sp.code() << kRtShift) | (kPointerSize & kImm16Mask);
+const Instr kPopInstruction = ADDIU | (kRegister_sp_Code << kRsShift)
+      | (kRegister_sp_Code << kRtShift) | (kPointerSize & kImm16Mask);
 // addiu(sp, sp, -4) part of Push(r) operation as pre-decrement of sp.
-const Instr kPushInstruction = ADDIU | (sp.code() << kRsShift)
-      | (sp.code() << kRtShift) | (-kPointerSize & kImm16Mask);
+const Instr kPushInstruction = ADDIU | (kRegister_sp_Code << kRsShift)
+      | (kRegister_sp_Code << kRtShift) | (-kPointerSize & kImm16Mask);
 // sw(r, MemOperand(sp, 0))
-const Instr kPushRegPattern = SW | (sp.code() << kRsShift)
+const Instr kPushRegPattern = SW | (kRegister_sp_Code << kRsShift)
       |  (0 & kImm16Mask);
 //  lw(r, MemOperand(sp, 0))
-const Instr kPopRegPattern = LW | (sp.code() << kRsShift)
+const Instr kPopRegPattern = LW | (kRegister_sp_Code << kRsShift)
       |  (0 & kImm16Mask);
 
-const Instr kLwRegFpOffsetPattern = LW | (s8_fp.code() << kRsShift)
+const Instr kLwRegFpOffsetPattern = LW | (kRegister_fp_Code << kRsShift)
       |  (0 & kImm16Mask);
 
-const Instr kSwRegFpOffsetPattern = SW | (s8_fp.code() << kRsShift)
+const Instr kSwRegFpOffsetPattern = SW | (kRegister_fp_Code << kRsShift)
       |  (0 & kImm16Mask);
 
-const Instr kLwRegFpNegOffsetPattern = LW | (s8_fp.code() << kRsShift)
+const Instr kLwRegFpNegOffsetPattern = LW | (kRegister_fp_Code << kRsShift)
       |  (kNegOffset & kImm16Mask);
 
-const Instr kSwRegFpNegOffsetPattern = SW | (s8_fp.code() << kRsShift)
+const Instr kSwRegFpNegOffsetPattern = SW | (kRegister_fp_Code << kRsShift)
       |  (kNegOffset & kImm16Mask);
 // A mask for the Rt register for push, pop, lw, sw instructions.
 const Instr kRtMask = kRtFieldMask;
@@ -273,6 +273,7 @@ static const int kMinimalBufferSize = 4 * KB;
 
 Assembler::Assembler(Isolate* arg_isolate, void* buffer, int buffer_size)
     : AssemblerBase(arg_isolate),
+      recorded_ast_id_(TypeFeedbackId::None()),
       positions_recorder_(this),
       emit_debug_code_(FLAG_debug_code) {
   if (buffer == NULL) {
@@ -850,7 +851,6 @@ bool Assembler::MustUseReg(RelocInfo::Mode rmode) {
   return rmode != RelocInfo::NONE;
 }
 
-
 void Assembler::GenInstrRegister(Opcode opcode,
                                  Register rs,
                                  Register rt,
@@ -1319,7 +1319,7 @@ void Assembler::srav(Register rd, Register rt, Register rs) {
 void Assembler::rotr(Register rd, Register rt, uint16_t sa) {
   // Should be called via MacroAssembler::Ror.
   ASSERT(rd.is_valid() && rt.is_valid() && is_uint5(sa));
-  ASSERT(mips32r2);
+  ASSERT(kArchVariant == kMips32r2);
   Instr instr = SPECIAL | (1 << kRsShift) | (rt.code() << kRtShift)
       | (rd.code() << kRdShift) | (sa << kSaShift) | SRL;
   emit(instr);
@@ -1329,7 +1329,7 @@ void Assembler::rotr(Register rd, Register rt, uint16_t sa) {
 void Assembler::rotrv(Register rd, Register rt, Register rs) {
   // Should be called via MacroAssembler::Ror.
   ASSERT(rd.is_valid() && rt.is_valid() && rs.is_valid() );
-  ASSERT(mips32r2);
+  ASSERT(kArchVariant == kMips32r2);
   Instr instr = SPECIAL | (rs.code() << kRsShift) | (rt.code() << kRtShift)
      | (rd.code() << kRdShift) | (1 << kSaShift) | SRLV;
   emit(instr);
@@ -1604,7 +1604,7 @@ void Assembler::clz(Register rd, Register rs) {
 void Assembler::ins_(Register rt, Register rs, uint16_t pos, uint16_t size) {
   // Should be called via MacroAssembler::Ins.
   // Ins instr has 'rt' field as dest, and two uint5: msb, lsb.
-  ASSERT(mips32r2);
+  ASSERT(kArchVariant == kMips32r2);
   GenInstrRegister(SPECIAL3, rs, rt, pos + size - 1, pos, INS);
 }
 
@@ -1612,7 +1612,7 @@ void Assembler::ins_(Register rt, Register rs, uint16_t pos, uint16_t size) {
 void Assembler::ext_(Register rt, Register rs, uint16_t pos, uint16_t size) {
   // Should be called via MacroAssembler::Ext.
   // Ext instr has 'rt' field as dest, and two uint5: msb, lsb.
-  ASSERT(mips32r2);
+  ASSERT(kArchVariant == kMips32r2);
   GenInstrRegister(SPECIAL3, rs, rt, size - 1, pos, EXT);
 }
 
@@ -1772,25 +1772,25 @@ void Assembler::ceil_w_d(FPURegister fd, FPURegister fs) {
 
 
 void Assembler::cvt_l_s(FPURegister fd, FPURegister fs) {
-  ASSERT(mips32r2);
+  ASSERT(kArchVariant == kMips32r2);
   GenInstrRegister(COP1, S, f0, fs, fd, CVT_L_S);
 }
 
 
 void Assembler::cvt_l_d(FPURegister fd, FPURegister fs) {
-  ASSERT(mips32r2);
+  ASSERT(kArchVariant == kMips32r2);
   GenInstrRegister(COP1, D, f0, fs, fd, CVT_L_D);
 }
 
 
 void Assembler::trunc_l_s(FPURegister fd, FPURegister fs) {
-  ASSERT(mips32r2);
+  ASSERT(kArchVariant == kMips32r2);
   GenInstrRegister(COP1, S, f0, fs, fd, TRUNC_L_S);
 }
 
 
 void Assembler::trunc_l_d(FPURegister fd, FPURegister fs) {
-  ASSERT(mips32r2);
+  ASSERT(kArchVariant == kMips32r2);
   GenInstrRegister(COP1, D, f0, fs, fd, TRUNC_L_D);
 }
 
@@ -1831,7 +1831,7 @@ void Assembler::cvt_s_w(FPURegister fd, FPURegister fs) {
 
 
 void Assembler::cvt_s_l(FPURegister fd, FPURegister fs) {
-  ASSERT(mips32r2);
+  ASSERT(kArchVariant == kMips32r2);
   GenInstrRegister(COP1, L, f0, fs, fd, CVT_S_L);
 }
 
@@ -1847,7 +1847,7 @@ void Assembler::cvt_d_w(FPURegister fd, FPURegister fs) {
 
 
 void Assembler::cvt_d_l(FPURegister fd, FPURegister fs) {
-  ASSERT(mips32r2);
+  ASSERT(kArchVariant == kMips32r2);
   GenInstrRegister(COP1, L, f0, fs, fd, CVT_D_L);
 }
 
@@ -2047,7 +2047,10 @@ void Assembler::RecordRelocInfo(RelocInfo::Mode rmode, intptr_t data) {
     }
     ASSERT(buffer_space() >= kMaxRelocSize);  // Too late to grow buffer here.
     if (rmode == RelocInfo::CODE_TARGET_WITH_ID) {
-      RelocInfo reloc_info_with_ast_id(pc_, rmode, RecordedAstId(), NULL);
+      RelocInfo reloc_info_with_ast_id(pc_,
+                                       rmode,
+                                       RecordedAstId().ToInt(),
+                                       NULL);
       ClearRecordedAstId();
       reloc_info_writer.Write(&reloc_info_with_ast_id);
     } else {
@@ -2135,6 +2138,15 @@ Address Assembler::target_address_at(Address pc) {
   // We should never get here, force a bad address if we do.
   UNREACHABLE();
   return (Address)0x0;
+}
+
+
+// MIPS and ia32 use opposite encoding for qNaN and sNaN, such that ia32
+// qNaN is a MIPS sNaN, and ia32 sNaN is MIPS qNaN. If running from a heap
+// snapshot generated on ia32, the resulting MIPS sNaN must be quieted.
+// OS::nan_value() returns a qNaN.
+void Assembler::QuietNaN(HeapObject* object) {
+  HeapNumber::cast(object)->set_value(OS::nan_value());
 }
 
 

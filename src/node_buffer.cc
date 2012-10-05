@@ -137,14 +137,14 @@ Buffer* Buffer::New(size_t length) {
 }
 
 
-Buffer* Buffer::New(char* data, size_t length) {
+Buffer* Buffer::New(const char* data, size_t length) {
   HandleScope scope;
 
   Local<Value> arg = Integer::NewFromUnsigned(0);
   Local<Object> obj = constructor_template->GetFunction()->NewInstance(1, &arg);
 
   Buffer *buffer = ObjectWrap::Unwrap<Buffer>(obj);
-  buffer->Replace(data, length, NULL, NULL);
+  buffer->Replace(const_cast<char*>(data), length, NULL, NULL);
 
   return buffer;
 }
@@ -198,6 +198,8 @@ Buffer::~Buffer() {
 }
 
 
+// if replace doesn't have a callback, data must be copied
+// const_cast in Buffer::New requires this
 void Buffer::Replace(char *data, size_t length,
                      free_callback callback, void *hint) {
   HandleScope scope;
@@ -206,7 +208,8 @@ void Buffer::Replace(char *data, size_t length,
     callback_(data_, callback_hint_);
   } else if (length_) {
     delete [] data_;
-    V8::AdjustAmountOfExternalAllocatedMemory(-(sizeof(Buffer) + length_));
+    V8::AdjustAmountOfExternalAllocatedMemory(
+        -static_cast<intptr_t>(sizeof(Buffer) + length_));
   }
 
   length_ = length;
@@ -406,12 +409,11 @@ Handle<Value> Buffer::Copy(const Arguments &args) {
   }
 
   Local<Object> target = args[0]->ToObject();
-  char *target_data = Buffer::Data(target);
-  ssize_t target_length = Buffer::Length(target);
-
-  ssize_t target_start = args[1]->Int32Value();
-  ssize_t source_start = args[2]->Int32Value();
-  ssize_t source_end = args[3]->IsInt32() ? args[3]->Int32Value()
+  char* target_data = Buffer::Data(target);
+  size_t target_length = Buffer::Length(target);
+  size_t target_start = args[1]->Uint32Value();
+  size_t source_start = args[2]->Uint32Value();
+  size_t source_end = args[3]->IsUint32() ? args[3]->Uint32Value()
                                           : source->length_;
 
   if (source_end < source_start) {
@@ -424,25 +426,24 @@ Handle<Value> Buffer::Copy(const Arguments &args) {
     return scope.Close(Integer::New(0));
   }
 
-  if (target_start < 0 || target_start >= target_length) {
+  if (target_start >= target_length) {
     return ThrowException(Exception::Error(String::New(
             "targetStart out of bounds")));
   }
 
-  if (source_start < 0 || source_start >= source->length_) {
+  if (source_start >= source->length_) {
     return ThrowException(Exception::Error(String::New(
             "sourceStart out of bounds")));
   }
 
-  if (source_end < 0 || source_end > source->length_) {
+  if (source_end > source->length_) {
     return ThrowException(Exception::Error(String::New(
             "sourceEnd out of bounds")));
   }
 
-  ssize_t to_copy = MIN(MIN(source_end - source_start,
-                            target_length - target_start),
-                            source->length_ - source_start);
-
+  size_t to_copy = MIN(MIN(source_end - source_start,
+                           target_length - target_start),
+                           source->length_ - source_start);
 
   // need to use slightly slower memmove is the ranges might overlap
   memmove((void *)(target_data + target_start),
@@ -551,17 +552,17 @@ Handle<Value> Buffer::AsciiWrite(const Arguments &args) {
   }
 
   Local<String> s = args[0]->ToString();
-
+  size_t length = s->Length();
   size_t offset = args[1]->Int32Value();
 
-  if (s->Length() > 0 && offset >= buffer->length_) {
+  if (length > 0 && offset >= buffer->length_) {
     return ThrowException(Exception::TypeError(String::New(
             "Offset is out of bounds")));
   }
 
   size_t max_length = args[2]->IsUndefined() ? buffer->length_ - offset
                                              : args[2]->Uint32Value();
-  max_length = MIN(s->Length(), MIN(buffer->length_ - offset, max_length));
+  max_length = MIN(length, MIN(buffer->length_ - offset, max_length));
 
   char *p = buffer->data_ + offset;
 
@@ -589,11 +590,12 @@ Handle<Value> Buffer::Base64Write(const Arguments &args) {
             "Argument must be a string")));
   }
 
-  String::AsciiValue s(args[0]->ToString());
+  String::AsciiValue s(args[0]);
+  size_t length = s.length();
   size_t offset = args[1]->Int32Value();
   size_t max_length = args[2]->IsUndefined() ? buffer->length_ - offset
                                              : args[2]->Uint32Value();
-  max_length = MIN(s.length(), MIN(buffer->length_ - offset, max_length));
+  max_length = MIN(length, MIN(buffer->length_ - offset, max_length));
 
   if (max_length && offset >= buffer->length_) {
     return ThrowException(Exception::TypeError(String::New(
@@ -653,7 +655,7 @@ Handle<Value> Buffer::BinaryWrite(const Arguments &args) {
   }
 
   Local<String> s = args[0]->ToString();
-
+  size_t length = s->Length();
   size_t offset = args[1]->Int32Value();
 
   if (s->Length() > 0 && offset >= buffer->length_) {
@@ -665,7 +667,7 @@ Handle<Value> Buffer::BinaryWrite(const Arguments &args) {
 
   size_t max_length = args[2]->IsUndefined() ? buffer->length_ - offset
                                              : args[2]->Uint32Value();
-  max_length = MIN(s->Length(), MIN(buffer->length_ - offset, max_length));
+  max_length = MIN(length, MIN(buffer->length_ - offset, max_length));
 
   int written = DecodeWrite(p, max_length, s, BINARY);
 
@@ -742,8 +744,8 @@ void Buffer::Initialize(Handle<Object> target) {
   assert(unbase64('\n') == -2);
   assert(unbase64('\r') == -2);
 
-  length_symbol = Persistent<String>::New(String::NewSymbol("length"));
-  chars_written_sym = Persistent<String>::New(String::NewSymbol("_charsWritten"));
+  length_symbol = NODE_PSYMBOL("length");
+  chars_written_sym = NODE_PSYMBOL("_charsWritten");
 
   Local<FunctionTemplate> t = FunctionTemplate::New(Buffer::New);
   constructor_template = Persistent<FunctionTemplate>::New(t);

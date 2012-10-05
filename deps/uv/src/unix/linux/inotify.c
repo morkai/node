@@ -21,6 +21,7 @@
 #include "uv.h"
 #include "tree.h"
 #include "../internal.h"
+#include "syscalls.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -31,91 +32,18 @@
 
 #include <sys/types.h>
 #include <unistd.h>
-#include <fcntl.h>
 
-#undef HAVE_INOTIFY_INIT
-#undef HAVE_INOTIFY_INIT1
-#undef HAVE_INOTIFY_ADD_WATCH
-#undef HAVE_INOTIFY_RM_WATCH
-
-#if __NR_inotify_init
-# define HAVE_INOTIFY_INIT 1
-#endif
-#if __NR_inotify_init1
-# define HAVE_INOTIFY_INIT1 1
-#endif
-#if __NR_inotify_add_watch
-# define HAVE_INOTIFY_ADD_WATCH 1
-#endif
-#if __NR_inotify_rm_watch
-# define HAVE_INOTIFY_RM_WATCH 1
-#endif
-
-#if HAVE_INOTIFY_INIT || HAVE_INOTIFY_INIT1
-# undef IN_ACCESS
-# undef IN_MODIFY
-# undef IN_ATTRIB
-# undef IN_CLOSE_WRITE
-# undef IN_CLOSE_NOWRITE
-# undef IN_OPEN
-# undef IN_MOVED_FROM
-# undef IN_MOVED_TO
-# undef IN_CREATE
-# undef IN_DELETE
-# undef IN_DELETE_SELF
-# undef IN_MOVE_SELF
-# define IN_ACCESS         0x001
-# define IN_MODIFY         0x002
-# define IN_ATTRIB         0x004
-# define IN_CLOSE_WRITE    0x008
-# define IN_CLOSE_NOWRITE  0x010
-# define IN_OPEN           0x020
-# define IN_MOVED_FROM     0x040
-# define IN_MOVED_TO       0x080
-# define IN_CREATE         0x100
-# define IN_DELETE         0x200
-# define IN_DELETE_SELF    0x400
-# define IN_MOVE_SELF      0x800
-struct inotify_event {
-  int32_t wd;
-  uint32_t mask;
-  uint32_t cookie;
-  uint32_t len;
-  /* char name[0]; */
+struct watcher_list {
+  RB_ENTRY(watcher_list) entry;
+  ngx_queue_t watchers;
+  char* path;
+  int wd;
 };
-#endif /* HAVE_INOTIFY_INIT || HAVE_INOTIFY_INIT1 */
 
-#undef IN_CLOEXEC
-#undef IN_NONBLOCK
-
-#if HAVE_INOTIFY_INIT1
-# define IN_CLOEXEC O_CLOEXEC
-# define IN_NONBLOCK O_NONBLOCK
-#endif /* HAVE_INOTIFY_INIT1 */
-
-#if HAVE_INOTIFY_INIT
-inline static int inotify_init(void) {
-  return syscall(__NR_inotify_init);
-}
-#endif /* HAVE_INOTIFY_INIT */
-
-#if HAVE_INOTIFY_INIT1
-inline static int inotify_init1(int flags) {
-  return syscall(__NR_inotify_init1, flags);
-}
-#endif /* HAVE_INOTIFY_INIT1 */
-
-#if HAVE_INOTIFY_ADD_WATCH
-inline static int inotify_add_watch(int fd, const char* path, uint32_t mask) {
-  return syscall(__NR_inotify_add_watch, fd, path, mask);
-}
-#endif /* HAVE_INOTIFY_ADD_WATCH */
-
-#if HAVE_INOTIFY_RM_WATCH
-inline static int inotify_rm_watch(int fd, uint32_t wd) {
-  return syscall(__NR_inotify_rm_watch, fd, wd);
-}
-#endif /* HAVE_INOTIFY_RM_WATCH */
+struct watcher_root {
+  struct watcher_list* rbh_root;
+};
+#define CAST(p) ((struct watcher_root*)(p))
 
 
 /* Don't look aghast, this is exactly how glibc's basename() works. */
@@ -125,52 +53,38 @@ static char* basename_r(const char* path) {
 }
 
 
-static int compare_watchers(const uv_fs_event_t* a, const uv_fs_event_t* b) {
-  if (a->fd < b->fd) return -1;
-  if (a->fd > b->fd) return 1;
+static int compare_watchers(const struct watcher_list* a,
+                            const struct watcher_list* b) {
+  if (a->wd < b->wd) return -1;
+  if (a->wd > b->wd) return 1;
   return 0;
 }
 
 
-RB_GENERATE_INTERNAL(uv__inotify_watchers, uv_fs_event_s, node, compare_watchers,
-  inline static __attribute__((unused)))
+RB_GENERATE_STATIC(watcher_root, watcher_list, entry, compare_watchers)
 
 
-void uv__inotify_loop_init(uv_loop_t* loop) {
-  RB_INIT(&loop->inotify_watchers);
-  loop->inotify_fd = -1;
-}
-
-
-void uv__inotify_loop_delete(uv_loop_t* loop) {
-  if (loop->inotify_fd == -1) return;
-  ev_io_stop(loop->ev, &loop->inotify_read_watcher);
-  close(loop->inotify_fd);
-  loop->inotify_fd = -1;
-}
-
-
-#if HAVE_INOTIFY_INIT || HAVE_INOTIFY_INIT1
-
-static void uv__inotify_read(EV_P_ ev_io* w, int revents);
+static void uv__inotify_read(uv_loop_t* loop, uv__io_t* w, int revents);
 
 
 static int new_inotify_fd(void) {
-#if HAVE_INOTIFY_INIT1
-  return inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
-#else
   int fd;
 
-  if ((fd = inotify_init()) == -1)
+  fd = uv__inotify_init1(UV__IN_NONBLOCK | UV__IN_CLOEXEC);
+  if (fd != -1)
+    return fd;
+  if (errno != ENOSYS)
+    return -1;
+
+  if ((fd = uv__inotify_init()) == -1)
     return -1;
 
   if (uv__cloexec(fd, 1) || uv__nonblock(fd, 1)) {
-    SAVE_ERRNO(uv__close(fd));
+    SAVE_ERRNO(close(fd));
     return -1;
   }
 
   return fd;
-#endif
 }
 
 
@@ -184,51 +98,37 @@ static int init_inotify(uv_loop_t* loop) {
     return -1;
   }
 
-  ev_io_init(&loop->inotify_read_watcher,
-             uv__inotify_read,
-             loop->inotify_fd,
-             EV_READ);
-  ev_io_start(loop->ev, &loop->inotify_read_watcher);
-  ev_unref(loop->ev);
+  uv__io_init(&loop->inotify_read_watcher,
+              uv__inotify_read,
+              loop->inotify_fd,
+              UV__IO_READ);
+  uv__io_start(loop, &loop->inotify_read_watcher);
 
   return 0;
 }
 
 
-static void add_watcher(uv_fs_event_t* handle) {
-  RB_INSERT(uv__inotify_watchers, &handle->loop->inotify_watchers, handle);
+static struct watcher_list* find_watcher(uv_loop_t* loop, int wd) {
+  struct watcher_list w;
+  w.wd = wd;
+  return RB_FIND(watcher_root, CAST(&loop->inotify_watchers), &w);
 }
 
 
-static uv_fs_event_t* find_watcher(uv_loop_t* loop, int wd) {
-  uv_fs_event_t handle;
-  handle.fd = wd;
-  return RB_FIND(uv__inotify_watchers, &loop->inotify_watchers, &handle);
-}
-
-
-static void remove_watcher(uv_fs_event_t* handle) {
-  RB_REMOVE(uv__inotify_watchers, &handle->loop->inotify_watchers, handle);
-}
-
-
-static void uv__inotify_read(EV_P_ ev_io* w, int revents) {
-  const struct inotify_event* e;
-  uv_fs_event_t* handle;
-  uv_loop_t* uv_loop;
-  const char* filename;
+static void uv__inotify_read(uv_loop_t* loop, uv__io_t* dummy, int events) {
+  const struct uv__inotify_event* e;
+  struct watcher_list* w;
+  uv_fs_event_t* h;
+  ngx_queue_t* q;
+  const char* path;
   ssize_t size;
-  int events;
   const char *p;
   /* needs to be large enough for sizeof(inotify_event) + strlen(filename) */
   char buf[4096];
 
-  uv_loop = container_of(w, uv_loop_t, inotify_read_watcher);
-
   while (1) {
-    do {
-      size = read(uv_loop->inotify_fd, buf, sizeof buf);
-    }
+    do
+      size = read(loop->inotify_fd, buf, sizeof(buf));
     while (size == -1 && errno == EINTR);
 
     if (size == -1) {
@@ -240,25 +140,28 @@ static void uv__inotify_read(EV_P_ ev_io* w, int revents) {
 
     /* Now we have one or more inotify_event structs. */
     for (p = buf; p < buf + size; p += sizeof(*e) + e->len) {
-      e = (const struct inotify_event*)p;
+      e = (const struct uv__inotify_event*)p;
 
       events = 0;
-      if (e->mask & (IN_ATTRIB|IN_MODIFY))
+      if (e->mask & (UV__IN_ATTRIB|UV__IN_MODIFY))
         events |= UV_CHANGE;
-      if (e->mask & ~(IN_ATTRIB|IN_MODIFY))
+      if (e->mask & ~(UV__IN_ATTRIB|UV__IN_MODIFY))
         events |= UV_RENAME;
 
-      handle = find_watcher(uv_loop, e->wd);
-      if (handle == NULL)
-        continue; /* Handle has already been closed. */
+      w = find_watcher(loop, e->wd);
+      if (w == NULL)
+        continue; /* Stale event, no watchers left. */
 
       /* inotify does not return the filename when monitoring a single file
        * for modifications. Repurpose the filename for API compatibility.
        * I'm not convinced this is a good thing, maybe it should go.
        */
-      filename = e->len ? (const char*) (e + 1) : basename_r(handle->filename);
+      path = e->len ? (const char*) (e + 1) : basename_r(w->path);
 
-      handle->cb(handle, filename, events, 0);
+      ngx_queue_foreach(q, &w->watchers) {
+        h = ngx_queue_data(q, uv_fs_event_t, watchers);
+        h->cb(h, path, events, 0);
+      }
     }
   }
 }
@@ -266,64 +169,68 @@ static void uv__inotify_read(EV_P_ ev_io* w, int revents) {
 
 int uv_fs_event_init(uv_loop_t* loop,
                      uv_fs_event_t* handle,
-                     const char* filename,
+                     const char* path,
                      uv_fs_event_cb cb,
                      int flags) {
+  struct watcher_list* w;
   int events;
   int wd;
 
-  loop->counters.fs_event_init++;
-
-  /* We don't support any flags yet. */
-  assert(!flags);
-
   if (init_inotify(loop)) return -1;
 
-  events = IN_ATTRIB
-         | IN_CREATE
-         | IN_MODIFY
-         | IN_DELETE
-         | IN_DELETE_SELF
-         | IN_MOVED_FROM
-         | IN_MOVED_TO;
+  events = UV__IN_ATTRIB
+         | UV__IN_CREATE
+         | UV__IN_MODIFY
+         | UV__IN_DELETE
+         | UV__IN_DELETE_SELF
+         | UV__IN_MOVE_SELF
+         | UV__IN_MOVED_FROM
+         | UV__IN_MOVED_TO;
 
-  wd = inotify_add_watch(loop->inotify_fd, filename, events);
-  if (wd == -1) return uv__set_sys_error(loop, errno);
+  wd = uv__inotify_add_watch(loop->inotify_fd, path, events);
+  if (wd == -1)
+    return uv__set_sys_error(loop, errno);
 
+  w = find_watcher(loop, wd);
+  if (w)
+    goto no_insert;
+
+  w = malloc(sizeof(*w) + strlen(path) + 1);
+  if (w == NULL)
+    return uv__set_sys_error(loop, ENOMEM);
+
+  w->wd = wd;
+  w->path = strcpy((char*)(w + 1), path);
+  ngx_queue_init(&w->watchers);
+  RB_INSERT(watcher_root, CAST(&loop->inotify_watchers), w);
+
+no_insert:
   uv__handle_init(loop, (uv_handle_t*)handle, UV_FS_EVENT);
-  handle->filename = strdup(filename);
+  uv__handle_start(handle); /* FIXME shouldn't start automatically */
+  ngx_queue_insert_tail(&w->watchers, &handle->watchers);
+  handle->filename = w->path;
   handle->cb = cb;
-  handle->fd = wd;
-  add_watcher(handle);
+  handle->wd = wd;
 
   return 0;
 }
 
 
-void uv__fs_event_destroy(uv_fs_event_t* handle) {
-  inotify_rm_watch(handle->loop->inotify_fd, handle->fd);
-  remove_watcher(handle);
-  handle->fd = -1;
+void uv__fs_event_close(uv_fs_event_t* handle) {
+  struct watcher_list* w;
 
-  free(handle->filename);
+  w = find_watcher(handle->loop, handle->wd);
+  assert(w != NULL);
+
+  handle->wd = -1;
   handle->filename = NULL;
+  uv__handle_stop(handle);
+  ngx_queue_remove(&handle->watchers);
+
+  if (ngx_queue_empty(&w->watchers)) {
+    /* No watchers left for this path. Clean up. */
+    RB_REMOVE(watcher_root, CAST(&handle->loop->inotify_watchers), w);
+    uv__inotify_rm_watch(handle->loop->inotify_fd, w->wd);
+    free(w);
+  }
 }
-
-#else /* !HAVE_INOTIFY_INIT || HAVE_INOTIFY_INIT1 */
-
-int uv_fs_event_init(uv_loop_t* loop,
-                     uv_fs_event_t* handle,
-                     const char* filename,
-                     uv_fs_event_cb cb,
-                     int flags) {
-  loop->counters.fs_event_init++;
-  uv__set_sys_error(loop, ENOSYS);
-  return -1;
-}
-
-
-void uv__fs_event_destroy(uv_fs_event_t* handle) {
-  UNREACHABLE();
-}
-
-#endif /* HAVE_INOTIFY_INIT || HAVE_INOTIFY_INIT1 */

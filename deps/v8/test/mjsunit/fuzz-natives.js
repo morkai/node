@@ -149,6 +149,7 @@ var knownProblems = {
   "PushBlockContext": true,
   "LazyCompile": true,
   "LazyRecompile": true,
+  "ParallelRecompile": true,
   "NotifyDeoptimized": true,
   "NotifyOSR": true,
   "CreateObjectLiteralBoilerplate": true,
@@ -184,8 +185,9 @@ var knownProblems = {
   "RegExpConstructResult": true,
   "_RegExpConstructResult": true,
 
-  // This function performs some checks compile time (it requires its first
-  // argument to be a compile time smi).
+  // This functions perform some checks compile time (they require one of their
+  // arguments to be a compile time smi).
+  "_DateField": true,
   "_GetFromCache": true,
 
   // This function expects its first argument to be a non-smi.

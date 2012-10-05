@@ -40,6 +40,8 @@ typedef uint32_t RegList;
 // Get the number of registers in a given register list.
 int NumRegs(RegList list);
 
+void SetUpJSCallerSavedCodeData();
+
 // Return the code of the n-th saved register available to JavaScript.
 int JSCallerSavedCode(int n);
 
@@ -204,10 +206,18 @@ class StackFrame BASE_EMBEDDED {
   Address fp() const { return state_.fp; }
   Address caller_sp() const { return GetCallerStackPointer(); }
 
+  // If this frame is optimized and was dynamically aligned return its old
+  // unaligned frame pointer.  When the frame is deoptimized its FP will shift
+  // up one word and become unaligned.
+  Address UnpaddedFP() const;
+
   Address pc() const { return *pc_address(); }
   void set_pc(Address pc) { *pc_address() = pc; }
 
   virtual void SetCallerFp(Address caller_fp) = 0;
+
+  // Manually changes value of fp in this object.
+  void UpdateFp(Address fp) { state_.fp = fp; }
 
   Address* pc_address() const { return state_.pc_address; }
 
@@ -241,6 +251,11 @@ class StackFrame BASE_EMBEDDED {
   virtual void Iterate(ObjectVisitor* v) const = 0;
   static void IteratePc(ObjectVisitor* v, Address* pc_address, Code* holder);
 
+  // Sets a callback function for return-address rewriting profilers
+  // to resolve the location of a return address to the location of the
+  // profiler's stashed return address.
+  static void SetReturnAddressLocationResolver(
+      ReturnAddressLocationResolver resolver);
 
   // Printing support.
   enum PrintMode { OVERVIEW, DETAILS };
@@ -562,6 +577,8 @@ class OptimizedFrame : public JavaScriptFrame {
   inline explicit OptimizedFrame(StackFrameIterator* iterator);
 
  private:
+  JSFunction* LiteralAt(FixedArray* literal_array, int literal_id);
+
   friend class StackFrameIterator;
 };
 
@@ -878,7 +895,7 @@ class StackFrameLocator BASE_EMBEDDED {
 
 // Reads all frames on the current stack and copies them into the current
 // zone memory.
-Vector<StackFrame*> CreateStackMap();
+Vector<StackFrame*> CreateStackMap(Zone* zone);
 
 } }  // namespace v8::internal
 

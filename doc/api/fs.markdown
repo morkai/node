@@ -62,23 +62,32 @@ the entire process until they complete--halting all connections.
 Relative path to filename can be used, remember however that this path will be relative
 to `process.cwd()`.
 
-## fs.rename(path1, path2, [callback])
+## fs.rename(oldPath, newPath, [callback])
 
 Asynchronous rename(2). No arguments other than a possible exception are given
 to the completion callback.
 
-## fs.renameSync(path1, path2)
+## fs.renameSync(oldPath, newPath)
 
 Synchronous rename(2).
 
-## fs.truncate(fd, len, [callback])
+## fs.ftruncate(fd, len, [callback])
 
 Asynchronous ftruncate(2). No arguments other than a possible exception are
 given to the completion callback.
 
-## fs.truncateSync(fd, len)
+## fs.ftruncateSync(fd, len)
 
 Synchronous ftruncate(2).
+
+## fs.truncate(path, len, [callback])
+
+Asynchronous truncate(2). No arguments other than a possible exception are
+given to the completion callback.
+
+## fs.truncateSync(path, len)
+
+Synchronous truncate(2).
 
 ## fs.chown(path, uid, gid, [callback])
 
@@ -130,6 +139,8 @@ Synchronous fchmod(2).
 Asynchronous lchmod(2). No arguments other than a possible exception
 are given to the completion callback.
 
+Only available on Mac OS X.
+
 ## fs.lchmodSync(path, mode)
 
 Synchronous lchmod(2).
@@ -137,7 +148,7 @@ Synchronous lchmod(2).
 ## fs.stat(path, [callback])
 
 Asynchronous stat(2). The callback gets two arguments `(err, stats)` where
-`stats` is a [fs.Stats](#fs.Stats) object.  See the [fs.Stats](#fs.Stats)
+`stats` is a [fs.Stats](#fs_class_fs_stats) object.  See the [fs.Stats](#fs_class_fs_stats)
 section below for more information.
 
 ## fs.lstat(path, [callback])
@@ -174,14 +185,16 @@ the completion callback.
 
 Synchronous link(2).
 
-## fs.symlink(linkdata, path, [type], [callback])
+## fs.symlink(srcpath, dstpath, [type], [callback])
 
 Asynchronous symlink(2). No arguments other than a possible exception are given
 to the completion callback.
-`type` argument can be either `'dir'` or `'file'` (default is `'file'`).  It is only 
+`type` argument can be either `'dir'`, `'file'`, or `'junction'` (default is `'file'`).  It is only 
 used on Windows (ignored on other platforms).
+Note that Windows junction points require the destination path to be absolute.  When using
+`'junction'`, the `destination` argument will automatically be normalized to absolute path.
 
-## fs.symlinkSync(linkdata, path, [type])
+## fs.symlinkSync(srcpath, dstpath, [type])
 
 Synchronous symlink(2).
 
@@ -194,12 +207,22 @@ linkString)`.
 
 Synchronous readlink(2). Returns the symbolic link's string value.
 
-## fs.realpath(path, [callback])
+## fs.realpath(path, [cache], callback)
 
-Asynchronous realpath(2).  The callback gets two arguments `(err,
-resolvedPath)`.  May use `process.cwd` to resolve relative paths.
+Asynchronous realpath(2). The `callback` gets two arguments `(err,
+resolvedPath)`. May use `process.cwd` to resolve relative paths. `cache` is an
+object literal of mapped paths that can be used to force a specific path
+resolution or avoid additional `fs.stat` calls for known real paths.
 
-## fs.realpathSync(path)
+Example:
+
+    var cache = {'/etc':'/private/etc'};
+    fs.realpath('/etc/passwd', cache, function (err, resolvedPath) {
+      if (err) throw err;
+      console.log(resolvedPath);
+    });
+
+## fs.realpathSync(path, [cache])
 
 Synchronous realpath(2). Returns the resolved path.
 
@@ -259,6 +282,19 @@ An exception occurs if the file does not exist.
 
 * `'r+'` - Open file for reading and writing.
 An exception occurs if the file does not exist.
+
+* `'rs'` - Open file for reading in synchronous mode. Instructs the operating
+  system to bypass the local file system cache.
+
+  This is primarily useful for opening files on NFS mounts as it allows you to
+  skip the potentially stale local cache. It has a very real impact on I/O
+  performance so don't use this mode unless you need it.
+
+  Note that this doesn't turn `fs.open()` into a synchronous blocking call.
+  If that's what you want then you should be using `fs.openSync()`
+
+* `'rs+'` - Open file for reading and writing, telling the OS to open it
+  synchronously. See notes for `'rs'` about using this with caution.
 
 * `'w'` - Open file for writing.
 The file is created (if it does not exist) or truncated (if it exists).
@@ -330,13 +366,7 @@ without waiting for the callback. For this scenario,
 
 ## fs.writeSync(fd, buffer, offset, length, position)
 
-Synchronous version of buffer-based `fs.write()`. Returns the number of bytes
-written.
-
-## fs.writeSync(fd, str, position, [encoding])
-
-Synchronous version of string-based `fs.write()`. `encoding` defaults to
-`'utf8'`. Returns the number of _bytes_ written.
+Synchronous version of `fs.write()`. Returns the number of bytes written.
 
 ## fs.read(fd, buffer, offset, length, position, [callback])
 
@@ -355,13 +385,7 @@ The callback is given the three arguments, `(err, bytesRead, buffer)`.
 
 ## fs.readSync(fd, buffer, offset, length, position)
 
-Synchronous version of buffer-based `fs.read`. Returns the number of
-`bytesRead`.
-
-## fs.readSync(fd, length, position, encoding)
-
-Synchronous version of string-based `fs.read`. Returns the number of
-`bytesRead`.
+Synchronous version of `fs.read`. Returns the number of `bytesRead`.
 
 ## fs.readFile(filename, [encoding], [callback])
 
@@ -422,7 +446,7 @@ The synchronous version of `fs.appendFile`.
 
 ## fs.watchFile(filename, [options], listener)
 
-    Stability: 2 - Unstable.  Use fs.watch instead, if available.
+    Stability: 2 - Unstable.  Use fs.watch instead, if possible.
 
 Watch for changes on `filename`. The callback `listener` will be called each
 time the file is accessed.
@@ -431,8 +455,7 @@ The second argument is optional. The `options` if provided should be an object
 containing two members a boolean, `persistent`, and `interval`. `persistent`
 indicates whether the process should continue to run as long as files are
 being watched. `interval` indicates how often the target should be polled,
-in milliseconds. (On Linux systems with inotify, `interval` is ignored.) The
-default is `{ persistent: true, interval: 0 }`.
+in milliseconds. The default is `{ persistent: true, interval: 5007 }`.
 
 The `listener` gets two arguments the current stat object and the previous
 stat object:
@@ -447,16 +470,20 @@ These stat objects are instances of `fs.Stat`.
 If you want to be notified when the file was modified, not just accessed
 you need to compare `curr.mtime` and `prev.mtime`.
 
-
-## fs.unwatchFile(filename)
+## fs.unwatchFile(filename, [listener])
 
     Stability: 2 - Unstable.  Use fs.watch instead, if available.
 
-Stop watching for changes on `filename`.
+Stop watching for changes on `filename`. If `listener` is specified, only that
+particular listener is removed. Otherwise, *all* listeners are removed and you
+have effectively stopped watching `filename`.
 
-## fs.watch(filename, [options], listener)
+Calling `fs.unwatchFile()` with a filename that is not being watched is a
+no-op, not an error.
 
-    Stability: 2 - Unstable.  Not available on all platforms.
+## fs.watch(filename, [options], [listener])
+
+    Stability: 2 - Unstable.
 
 Watch for changes on `filename`, where `filename` is either a file or a
 directory.  The returned object is a [fs.FSWatcher](#fs_class_fs_fswatcher).
@@ -490,9 +517,12 @@ to be notified of filesystem changes.
 * On Windows systems, this feature depends on `ReadDirectoryChangesW`.
 
 If the underlying functionality is not available for some reason, then
-`fs.watch` will not be able to function.  You can still use
-`fs.watchFile`, which uses stat polling, but it is slower and less
-reliable.
+`fs.watch` will not be able to function.  For example, watching files or
+directories on network file systems (NFS, SMB, etc.) often doesn't work
+reliably or at all.
+
+You can still use `fs.watchFile`, which uses stat polling, but it is slower and
+less reliable.
 
 #### Filename Argument
 
@@ -513,7 +543,7 @@ callback, and have some fallback logic if it is null.
       }
     });
 
-## fs.exists(p, [callback])
+## fs.exists(path, [callback])
 
 Test whether or not the given path exists by checking with the file system.
 Then call the `callback` argument with either true or false.  Example:
@@ -523,7 +553,7 @@ Then call the `callback` argument with either true or false.  Example:
     });
 
 
-## fs.existsSync(p)
+## fs.existsSync(path)
 
 Synchronous version of `fs.exists`.
 
@@ -586,7 +616,7 @@ Returns a new ReadStream object (See `Readable Stream`).
 
 `options` can include `start` and `end` values to read a range of bytes from
 the file instead of the entire file.  Both `start` and `end` are inclusive and
-start at 0.
+start at 0. The `encoding` can be `'utf8'`, `'ascii'`, or `'base64'`.
 
 An example to read the last 10 bytes of a file which is 100 bytes long:
 
@@ -595,7 +625,7 @@ An example to read the last 10 bytes of a file which is 100 bytes long:
 
 ## Class: fs.ReadStream
 
-`ReadStream` is a [Readable Stream](stream.html#readable_stream).
+`ReadStream` is a [Readable Stream](stream.html#stream_readable_stream).
 
 ### Event: 'open'
 
@@ -621,7 +651,7 @@ default mode `w`.
 
 ## fs.WriteStream
 
-`WriteStream` is a [Writable Stream](stream.html#writable_stream).
+`WriteStream` is a [Writable Stream](stream.html#stream_writable_stream).
 
 ### Event: 'open'
 
@@ -648,7 +678,7 @@ Stop watching for changes on the given `fs.FSWatcher`.
 * `filename` {String} The filename that changed (if relevant/available)
 
 Emitted when something changes in a watched directory or file.
-See more details in [fs.watch](#fs.watch).
+See more details in [fs.watch](#fs_fs_watch_filename_options_listener).
 
 ### Event: 'error'
 

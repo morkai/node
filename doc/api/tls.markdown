@@ -76,6 +76,16 @@ handshake extensions allowing you:
     certificates.
 
 
+## tls.getCiphers()
+
+Returns an array with the names of the supported SSL ciphers.
+
+Example:
+
+    var ciphers = tls.getCiphers();
+    console.log(ciphers); // ['AES128-SHA', 'AES256-SHA', ...]
+
+
 ## tls.createServer(options, [secureConnectionListener])
 
 Creates a new [tls.Server][].  The `connectionListener` argument is
@@ -120,6 +130,12 @@ automatically set as a listener for the [secureConnection][] event.  The
     acceptable cipher. Unfortunately, `AES256-SHA` is a CBC cipher and therefore
     susceptible to BEAST attacks. Do *not* use it.
 
+  - `handshakeTimeout`: Abort the connection if the SSL/TLS handshake does not
+    finish in this many milliseconds. The default is 120 seconds.
+
+    A `'clientError'` is emitted on the `tls.Server` object whenever a handshake
+    times out.
+
   - `honorCipherOrder` : When choosing a cipher, use the server's preferences
     instead of the client preferences.
 
@@ -147,6 +163,10 @@ automatically set as a listener for the [secureConnection][] event.  The
     (You can use `crypto.createCredentials(...).context` to get proper
     SecureContext). If `SNICallback` wasn't provided - default callback with
     high-level API will be used (see below).
+
+  - `sessionTimeout`: An integer specifying the seconds after which TLS
+    session identifiers and TLS session tickets created by the server are
+    timed out. See [SSL_CTX_set_timeout] for more details.
 
   - `sessionIdContext`: A string containing a opaque identifier for session
     resumption. If `requestCert` is `true`, the default is MD5 hash value
@@ -208,8 +228,17 @@ You can test this server by connecting to it with `openssl s_client`:
     openssl s_client -connect 127.0.0.1:8000
 
 
-## tls.connect(options, [secureConnectListener])
-## tls.connect(port, [host], [options], [secureConnectListener])
+## tls.SLAB_BUFFER_SIZE
+
+Size of slab buffer used by all tls servers and clients.
+Default: `10 * 1024 * 1024`.
+
+
+Don't change the defaults unless you know what you are doing.
+
+
+## tls.connect(options, [callback])
+## tls.connect(port, [host], [options], [callback])
 
 Creates a new client connection to the given `port` and `host` (old API) or
 `options.port` and `options.host`. (If `host` is omitted, it defaults to
@@ -249,7 +278,7 @@ Creates a new client connection to the given `port` and `host` (old API) or
 
   - `servername`: Servername for SNI (Server Name Indication) TLS extension.
 
-The `secureConnectListener` parameter will be added as a listener for the
+The `callback` parameter will be added as a listener for the
 ['secureConnect'][] event.
 
 `tls.connect()` returns a [CleartextStream][] object.
@@ -367,10 +396,12 @@ SNI.
 
 ### Event: 'clientError'
 
-`function (exception) { }`
+`function (exception, securePair) { }`
 
 When a client connection emits an 'error' event before secure connection is
 established - it will be forwarded here.
+
+`securePair` is the `tls.SecurePair` that the error originated from.
 
 
 ### Event: 'newSession'
@@ -431,6 +462,15 @@ gets high.
 
 The number of concurrent connections on the server.
 
+
+## Class: CryptoStream
+
+This is an encrypted stream.
+
+### cryptoStream.bytesWritten
+
+A proxy to the underlying socket's bytesWritten accessor, this will return
+the total bytes written to the socket, *including the TLS overhead*.
 
 ## Class: tls.CleartextStream
 
@@ -525,3 +565,4 @@ The numeric representation of the remote port. For example, `443`.
 [secureConnection]: #tls_event_secureconnection
 [Stream]: stream.html#stream_stream
 [tls.Server]: #tls_class_tls_server
+[SSL_CTX_set_timeout]: http://www.openssl.org/docs/ssl/SSL_CTX_set_timeout.html

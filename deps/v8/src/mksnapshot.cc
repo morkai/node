@@ -166,30 +166,37 @@ class CppByteSink : public PartialSnapshotSink {
   }
 
   void WriteSpaceUsed(
+      const char* prefix,
       int new_space_used,
       int pointer_space_used,
       int data_space_used,
       int code_space_used,
       int map_space_used,
-      int cell_space_used,
-      int large_space_used) {
-    fprintf(fp_, "const int Snapshot::new_space_used_ = %d;\n", new_space_used);
+      int cell_space_used) {
     fprintf(fp_,
-            "const int Snapshot::pointer_space_used_ = %d;\n",
+            "const int Snapshot::%snew_space_used_ = %d;\n",
+            prefix,
+            new_space_used);
+    fprintf(fp_,
+            "const int Snapshot::%spointer_space_used_ = %d;\n",
+            prefix,
             pointer_space_used);
     fprintf(fp_,
-            "const int Snapshot::data_space_used_ = %d;\n",
+            "const int Snapshot::%sdata_space_used_ = %d;\n",
+            prefix,
             data_space_used);
     fprintf(fp_,
-            "const int Snapshot::code_space_used_ = %d;\n",
+            "const int Snapshot::%scode_space_used_ = %d;\n",
+            prefix,
             code_space_used);
-    fprintf(fp_, "const int Snapshot::map_space_used_ = %d;\n", map_space_used);
     fprintf(fp_,
-            "const int Snapshot::cell_space_used_ = %d;\n",
+            "const int Snapshot::%smap_space_used_ = %d;\n",
+            prefix,
+            map_space_used);
+    fprintf(fp_,
+            "const int Snapshot::%scell_space_used_ = %d;\n",
+            prefix,
             cell_space_used);
-    fprintf(fp_,
-            "const int Snapshot::large_space_used_ = %d;\n",
-            large_space_used);
   }
 
   void WritePartialSnapshot() {
@@ -311,11 +318,12 @@ int main(int argc, char** argv) {
             "\nException thrown while compiling natives - see above.\n\n");
     exit(1);
   }
+  Isolate* isolate = context->GetIsolate();
   if (i::FLAG_extra_code != NULL) {
     context->Enter();
     // Capture 100 frames if anything happens.
     V8::SetCaptureStackTraceForUncaughtExceptions(true, 100);
-    HandleScope scope;
+    HandleScope scope(isolate);
     const char* name = i::FLAG_extra_code;
     FILE* file = i::OS::FOpen(name, "rb");
     if (file == NULL) {
@@ -368,7 +376,7 @@ int main(int argc, char** argv) {
     context->Exit();
   }
   // Make sure all builtin scripts are cached.
-  { HandleScope scope;
+  { HandleScope scope(isolate);
     for (int i = 0; i < i::Natives::GetBuiltinsCount(); i++) {
       i::Isolate::Current()->bootstrapper()->NativesSourceLookup(i);
     }
@@ -377,7 +385,7 @@ int main(int argc, char** argv) {
   // context even after we have disposed of the context.
   HEAP->CollectAllGarbage(i::Heap::kNoGCFlags, "mksnapshot");
   i::Object* raw_context = *(v8::Utils::OpenHandle(*context));
-  context.Dispose();
+  context.Dispose(context->GetIsolate());
   CppByteSink sink(argv[1]);
   // This results in a somewhat smaller snapshot, probably because it gets rid
   // of some things that are cached between garbage collections.
@@ -400,12 +408,20 @@ int main(int argc, char** argv) {
   sink.WritePartialSnapshot();
 
   sink.WriteSpaceUsed(
+      "context_",
       partial_ser.CurrentAllocationAddress(i::NEW_SPACE),
       partial_ser.CurrentAllocationAddress(i::OLD_POINTER_SPACE),
       partial_ser.CurrentAllocationAddress(i::OLD_DATA_SPACE),
       partial_ser.CurrentAllocationAddress(i::CODE_SPACE),
       partial_ser.CurrentAllocationAddress(i::MAP_SPACE),
-      partial_ser.CurrentAllocationAddress(i::CELL_SPACE),
-      partial_ser.CurrentAllocationAddress(i::LO_SPACE));
+      partial_ser.CurrentAllocationAddress(i::CELL_SPACE));
+  sink.WriteSpaceUsed(
+      "",
+      ser.CurrentAllocationAddress(i::NEW_SPACE),
+      ser.CurrentAllocationAddress(i::OLD_POINTER_SPACE),
+      ser.CurrentAllocationAddress(i::OLD_DATA_SPACE),
+      ser.CurrentAllocationAddress(i::CODE_SPACE),
+      ser.CurrentAllocationAddress(i::MAP_SPACE),
+      ser.CurrentAllocationAddress(i::CELL_SPACE));
   return 0;
 }

@@ -30,7 +30,7 @@
 CXX ?= g++
 LINK ?= g++
 OUTDIR ?= out
-TESTJOBS ?= -j16
+TESTJOBS ?=
 GYPFLAGS ?=
 TESTFLAGS ?=
 ANDROID_NDK_ROOT ?=
@@ -58,6 +58,16 @@ endif
 ifeq ($(objectprint), on)
   GYPFLAGS += -Dv8_object_print=1
 endif
+# verifyheap=on
+ifeq ($(verifyheap), on)
+  GYPFLAGS += -Dv8_enable_verify_heap=1
+endif
+# backtrace=off
+ifeq ($(backtrace), off)
+  GYPFLAGS += -Dv8_enable_backtrace=0
+else
+  GYPFLAGS += -Dv8_enable_backtrace=1
+endif
 # snapshot=off
 ifeq ($(snapshot), off)
   GYPFLAGS += -Dv8_use_snapshot='false'
@@ -73,15 +83,17 @@ endif
 ifeq ($(gdbjit), on)
   GYPFLAGS += -Dv8_enable_gdbjit=1
 endif
-# liveobjectlist=on
-ifeq ($(liveobjectlist), on)
-  GYPFLAGS += -Dv8_use_liveobjectlist=true
+# vfp2=off
+ifeq ($(vfp2), off)
+  GYPFLAGS += -Dv8_can_use_vfp2_instructions=false
+else
+  GYPFLAGS += -Dv8_can_use_vfp2_instructions=true -Darm_fpu=vfpv2
 endif
 # vfp3=off
 ifeq ($(vfp3), off)
-  GYPFLAGS += -Dv8_can_use_vfp_instructions=false
+  GYPFLAGS += -Dv8_can_use_vfp3_instructions=false
 else
-  GYPFLAGS += -Dv8_can_use_vfp_instructions=true
+  GYPFLAGS += -Dv8_can_use_vfp3_instructions=true -Darm_fpu=vfpv3
 endif
 # debuggersupport=off
 ifeq ($(debuggersupport), off)
@@ -111,6 +123,10 @@ endif
 ifeq ($(hardfp), on)
   GYPFLAGS += -Dv8_use_arm_eabi_hardfloat=true
 endif
+# armv7=false
+ifeq ($(armv7), false)
+  GYPFLAGS += -Darmv7=0
+endif
 
 # ----------------- available targets: --------------------
 # - "dependencies": pulls in external dependencies (currently: GYP)
@@ -132,7 +148,7 @@ endif
 ARCHES = ia32 x64 arm mipsel
 DEFAULT_ARCHES = ia32 x64 arm
 MODES = release debug
-ANDROID_ARCHES = android_ia32 android_arm
+ANDROID_ARCHES = android_ia32 android_arm android_mipsel
 
 # List of files that trigger Makefile regeneration:
 GYPFILES = build/all.gyp build/common.gypi build/standalone.gypi \
@@ -199,20 +215,20 @@ $(ANDROID_BUILDS): $(GYPFILES) $(ENVFILE) build/android.gypi \
 
 # Test targets.
 check: all
-	@tools/test-wrapper-gypbuild.py $(TESTJOBS) --outdir=$(OUTDIR) \
+	@tools/run-tests.py $(TESTJOBS) --outdir=$(OUTDIR) \
 	    --arch=$(shell echo $(DEFAULT_ARCHES) | sed -e 's/ /,/g') \
 	    $(TESTFLAGS)
 
 $(addsuffix .check,$(MODES)): $$(basename $$@)
-	@tools/test-wrapper-gypbuild.py $(TESTJOBS) --outdir=$(OUTDIR) \
+	@tools/run-tests.py $(TESTJOBS) --outdir=$(OUTDIR) \
 	    --mode=$(basename $@) $(TESTFLAGS)
 
 $(addsuffix .check,$(ARCHES)): $$(basename $$@)
-	@tools/test-wrapper-gypbuild.py $(TESTJOBS) --outdir=$(OUTDIR) \
+	@tools/run-tests.py $(TESTJOBS) --outdir=$(OUTDIR) \
 	    --arch=$(basename $@) $(TESTFLAGS)
 
 $(CHECKS): $$(basename $$@)
-	@tools/test-wrapper-gypbuild.py $(TESTJOBS) --outdir=$(OUTDIR) \
+	@tools/run-tests.py $(TESTJOBS) --outdir=$(OUTDIR) \
 	    --arch-and-mode=$(basename $@) $(TESTFLAGS)
 
 $(addsuffix .sync, $(ANDROID_BUILDS)): $$(basename $$@)
@@ -220,16 +236,16 @@ $(addsuffix .sync, $(ANDROID_BUILDS)): $$(basename $$@)
 	                       $(shell pwd) $(ANDROID_V8)
 
 $(addsuffix .check, $(ANDROID_BUILDS)): $$(basename $$@).sync
-	@tools/test-wrapper-gypbuild.py $(TESTJOBS) --outdir=$(OUTDIR) \
+	@tools/run-tests.py $(TESTJOBS) --outdir=$(OUTDIR) \
 	     --arch-and-mode=$(basename $@) \
 	     --timeout=600 \
-	     --special-command="tools/android-run.py @"
+	     --command-prefix="tools/android-run.py"
 
 $(addsuffix .check, $(ANDROID_ARCHES)): \
                 $(addprefix $$(basename $$@).,$(MODES)).check
 
 native.check: native
-	@tools/test-wrapper-gypbuild.py $(TESTJOBS) --outdir=$(OUTDIR)/native \
+	@tools/run-tests.py $(TESTJOBS) --outdir=$(OUTDIR)/native \
 	    --arch-and-mode=. $(TESTFLAGS)
 
 # Clean targets. You can clean each architecture individually, or everything.
@@ -280,6 +296,7 @@ $(ENVFILE).new:
 	    echo "CXX=$(CXX)" >> $(ENVFILE).new
 
 # Dependencies.
+# Remember to keep these in sync with the DEPS file.
 dependencies:
 	svn checkout --force http://gyp.googlecode.com/svn/trunk build/gyp \
-	    --revision 1282
+	    --revision 1501

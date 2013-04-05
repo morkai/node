@@ -93,6 +93,20 @@ that writes to them are usually blocking.  They are blocking in the case
 that they refer to regular files or TTY file descriptors. In the case they
 refer to pipes, they are non-blocking like other streams.
 
+To check if Node is being run in a TTY context, read the `isTTY` property
+on `process.stderr`, `process.stdout`, or `process.stdin`:
+
+    $ node -p "Boolean(process.stdin.isTTY)"
+    true
+    $ echo "foo" | node -p "Boolean(process.stdin.isTTY)"
+    false
+
+    $ node -p "Boolean(process.stdout.isTTY)"
+    true
+    $ node -p "Boolean(process.stdout.isTTY)" | cat
+    false
+
+See [the tty docs](tty.html#tty_tty) for more information.
 
 ## process.stderr
 
@@ -261,6 +275,43 @@ blocks while resolving it to a numerical ID.
     }
 
 
+## process.getgroups()
+
+Note: this function is only available on POSIX platforms (i.e. not Windows)
+
+Returns an array with the supplementary group IDs. POSIX leaves it unspecified
+if the effective group ID is included but node.js ensures it always is.
+
+
+## process.setgroups(groups)
+
+Note: this function is only available on POSIX platforms (i.e. not Windows)
+
+Sets the supplementary group IDs. This is a privileged operation, meaning you
+need to be root or have the CAP_SETGID capability.
+
+The list can contain group IDs, group names or both.
+
+
+## process.initgroups(user, extra_group)
+
+Note: this function is only available on POSIX platforms (i.e. not Windows)
+
+Reads /etc/group and initializes the group access list, using all groups of
+which the user is a member. This is a privileged operation, meaning you need
+to be root or have the CAP_SETGID capability.
+
+`user` is a user name or user ID. `extra_group` is a group name or group ID.
+
+Some care needs to be taken when dropping privileges. Example:
+
+    console.log(process.getgroups());         // [ 0 ]
+    process.initgroups('bnoordhuis', 1000);   // switch user
+    console.log(process.getgroups());         // [ 27, 30, 46, 1000, 0 ]
+    process.setgid(1000);                     // drop root gid
+    console.log(process.getgroups());         // [ 27, 30, 46, 1000 ]
+
+
 ## process.version
 
 A compiled-in property that exposes `NODE_VERSION`.
@@ -299,6 +350,9 @@ An example of the possible output looks like:
        { host_arch: 'x64',
          node_install_npm: 'true',
          node_prefix: '',
+         node_shared_cares: 'false',
+         node_shared_http_parser: 'false',
+         node_shared_libuv: 'false',
          node_shared_v8: 'false',
          node_shared_zlib: 'false',
          node_use_dtrace: 'false',
@@ -339,9 +393,20 @@ The PID of the process.
 
     console.log('This process is pid ' + process.pid);
 
+
 ## process.title
 
 Getter/setter to set what is displayed in 'ps'.
+
+When used as a setter, the maximum length is platform-specific and probably
+short.
+
+On Linux and OS X, it's limited to the size of the binary name plus the
+length of the command line arguments because it overwrites the argv memory.
+
+v0.8 allowed for longer process title strings by also overwriting the environ
+memory but that was potentially insecure/confusing in some (rather obscure)
+cases.
 
 
 ## process.arch
@@ -489,15 +554,15 @@ primary use is for measuring performance between intervals.
 You may pass in the result of a previous call to `process.hrtime()` to get
 a diff reading, useful for benchmarks and measuring intervals:
 
-    var t = process.hrtime();
-    // [ 1800216, 927643717 ]
+    var time = process.hrtime();
+    // [ 1800216, 25 ]
 
     setTimeout(function() {
-      t = process.hrtime(t);
-      // [ 1, 6962306 ]
+      var diff = process.hrtime(time);
+      // [ 1, 552 ]
 
-      console.log('benchmark took %d seconds and %d nanoseconds', t[0], t[1]);
-      // benchmark took 1 seconds and 6962306 nanoseconds
+      console.log('benchmark took %d nanoseconds', diff[0] * 1e9 + diff[1]);
+      // benchmark took 1000000527 nanoseconds
     }, 1000);
 
 [EventEmitter]: events.html#events_class_events_eventemitter

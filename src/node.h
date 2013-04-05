@@ -83,7 +83,10 @@
 # endif
 #endif
 
+
 namespace node {
+
+extern v8::Isolate* node_isolate;
 
 NODE_EXTERN extern bool no_deprecation;
 
@@ -95,7 +98,7 @@ void Load(v8::Handle<v8::Object> process);
 void EmitExit(v8::Handle<v8::Object> process);
 
 #define NODE_PSYMBOL(s) \
-  v8::Persistent<v8::String>::New(v8::String::NewSymbol(s))
+  v8::Persistent<v8::String>::New(node_isolate, v8::String::NewSymbol(s))
 
 /* Converts a unixtime to V8 Date */
 #define NODE_UNIXTIME_V8(t) v8::Date::New(1000*static_cast<double>(t))
@@ -103,7 +106,7 @@ void EmitExit(v8::Handle<v8::Object> process);
 
 #define NODE_DEFINE_CONSTANT(target, constant)                            \
   (target)->Set(v8::String::NewSymbol(#constant),                         \
-                v8::Integer::New(constant),                               \
+                v8::Number::New(constant),                                \
                 static_cast<v8::PropertyAttribute>(                       \
                     v8::ReadOnly|v8::DontDelete))
 
@@ -146,25 +149,13 @@ NODE_EXTERN ssize_t DecodeWrite(char *buf,
                                 v8::Handle<v8::Value>,
                                 enum encoding encoding = BINARY);
 
-v8::Local<v8::Object> BuildStatsObject(const uv_statbuf_t* s);
-
-
-/**
- * Call this when your constructor is invoked as a regular function, e.g.
- * Buffer(10) instead of new Buffer(10).
- * @param constructorTemplate Constructor template to instantiate from.
- * @param args The arguments object passed to your constructor.
- * @see v8::Arguments::IsConstructCall
- */
-v8::Handle<v8::Value> FromConstructorTemplate(
-    v8::Persistent<v8::FunctionTemplate>& constructorTemplate,
-    const v8::Arguments& args);
+v8::Local<v8::Object> BuildStatsObject(const uv_stat_t* s);
 
 
 static inline v8::Persistent<v8::Function>* cb_persist(
     const v8::Local<v8::Value> &v) {
   v8::Persistent<v8::Function> *fn = new v8::Persistent<v8::Function>();
-  *fn = v8::Persistent<v8::Function>::New(v8::Local<v8::Function>::Cast(v));
+  *fn = v8::Persistent<v8::Function>::New(node_isolate, v8::Local<v8::Function>::Cast(v));
   return fn;
 }
 
@@ -176,7 +167,7 @@ static inline v8::Persistent<v8::Function>* cb_unwrap(void *data) {
 }
 
 static inline void cb_destroy(v8::Persistent<v8::Function> * cb) {
-  cb->Dispose();
+  cb->Dispose(node_isolate);
   delete cb;
 }
 
@@ -198,11 +189,15 @@ NODE_EXTERN v8::Local<v8::Value> WinapiErrnoException(int errorno,
 
 const char *signo_string(int errorno);
 
+
+NODE_EXTERN typedef void (* addon_register_func)(
+    v8::Handle<v8::Object> exports, v8::Handle<v8::Value> module);
+
 struct node_module_struct {
   int version;
   void *dso_handle;
   const char *filename;
-  void (*register_func) (v8::Handle<v8::Object> target);
+  node::addon_register_func register_func;
   const char *modname;
 };
 
@@ -214,7 +209,7 @@ node_module_struct* get_builtin_module(const char *name);
  * an API is broken in the C++ side, including in v8 or
  * other dependencies.
  */
-#define NODE_MODULE_VERSION 0x000A /* v0.10 */
+#define NODE_MODULE_VERSION 0x000C /* v0.12 */
 
 #define NODE_STANDARD_MODULE_STUFF \
           NODE_MODULE_VERSION,     \
@@ -232,7 +227,7 @@ node_module_struct* get_builtin_module(const char *name);
     NODE_MODULE_EXPORT node::node_module_struct modname ## _module =  \
     {                                                                 \
       NODE_STANDARD_MODULE_STUFF,                                     \
-      regfunc,                                                        \
+      (node::addon_register_func)regfunc,                             \
       NODE_STRINGIFY(modname)                                         \
     };                                                                \
   }
@@ -265,10 +260,5 @@ MakeCallback(const v8::Handle<v8::Object> object,
              v8::Handle<v8::Value> argv[]);
 
 }  // namespace node
-
-#if !defined(NODE_WANT_INTERNALS) && !defined(_WIN32)
-# include "ev-emul.h"
-# include "eio-emul.h"
-#endif
 
 #endif  // SRC_NODE_H_

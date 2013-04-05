@@ -133,13 +133,15 @@ class LUnallocated: public LOperand {
   // index in the upper bits.
   static const int kPolicyWidth = 3;
   static const int kLifetimeWidth = 1;
-  static const int kVirtualRegisterWidth = 18;
+  static const int kVirtualRegisterWidth = 15;
 
   static const int kPolicyShift = kKindFieldWidth;
   static const int kLifetimeShift = kPolicyShift + kPolicyWidth;
   static const int kVirtualRegisterShift = kLifetimeShift + kLifetimeWidth;
   static const int kFixedIndexShift =
       kVirtualRegisterShift + kVirtualRegisterWidth;
+  static const int kFixedIndexWidth = 32 - kFixedIndexShift;
+  STATIC_ASSERT(kFixedIndexWidth > 5);
 
   class PolicyField : public BitField<Policy, kPolicyShift, kPolicyWidth> { };
 
@@ -154,8 +156,8 @@ class LUnallocated: public LOperand {
   };
 
   static const int kMaxVirtualRegisters = 1 << kVirtualRegisterWidth;
-  static const int kMaxFixedIndex = 63;
-  static const int kMinFixedIndex = -64;
+  static const int kMaxFixedIndex = (1 << (kFixedIndexWidth - 1)) - 1;
+  static const int kMinFixedIndex = -(1 << (kFixedIndexWidth - 1));
 
   bool HasAnyPolicy() const {
     return policy() == ANY;
@@ -460,6 +462,7 @@ class LEnvironment: public ZoneObject {
                int argument_count,
                int value_count,
                LEnvironment* outer,
+               HEnterInlined* entry,
                Zone* zone)
       : closure_(closure),
         frame_type_(frame_type),
@@ -475,6 +478,7 @@ class LEnvironment: public ZoneObject {
         spilled_registers_(NULL),
         spilled_double_registers_(NULL),
         outer_(outer),
+        entry_(entry),
         zone_(zone) { }
 
   Handle<JSFunction> closure() const { return closure_; }
@@ -491,6 +495,7 @@ class LEnvironment: public ZoneObject {
   }
   const ZoneList<LOperand*>* values() const { return &values_; }
   LEnvironment* outer() const { return outer_; }
+  HEnterInlined* entry() { return entry_; }
 
   void AddValue(LOperand* operand,
                 Representation representation,
@@ -556,6 +561,7 @@ class LEnvironment: public ZoneObject {
   LOperand** spilled_double_registers_;
 
   LEnvironment* outer_;
+  HEnterInlined* entry_;
 
   Zone* zone_;
 };
@@ -575,6 +581,7 @@ class ShallowIterator BASE_EMBEDDED {
 
   LOperand* Current() {
     ASSERT(!Done());
+    ASSERT(env_->values()->at(current_) != NULL);
     return env_->values()->at(current_);
   }
 
@@ -616,6 +623,7 @@ class DeepIterator BASE_EMBEDDED {
 
   LOperand* Current() {
     ASSERT(!current_iterator_.Done());
+    ASSERT(current_iterator_.Current() != NULL);
     return current_iterator_.Current();
   }
 
@@ -655,6 +663,7 @@ class LChunk: public ZoneObject {
   int spill_slot_count() const { return spill_slot_count_; }
   CompilationInfo* info() const { return info_; }
   HGraph* graph() const { return graph_; }
+  Isolate* isolate() const { return graph_->isolate(); }
   const ZoneList<LInstruction*>* instructions() const { return &instructions_; }
   void AddGapMove(int index, LOperand* from, LOperand* to);
   LGap* GetGapAt(int index) const;
@@ -676,22 +685,22 @@ class LChunk: public ZoneObject {
 
   Zone* zone() const { return info_->zone(); }
 
-  Handle<Code> Codegen();
+  Handle<Code> Codegen(Code::Kind kind);
+
+  void set_allocated_double_registers(BitVector* allocated_registers);
+  BitVector* allocated_double_registers() {
+    return allocated_double_registers_;
+  }
 
  protected:
-  LChunk(CompilationInfo* info, HGraph* graph)
-      : spill_slot_count_(0),
-        info_(info),
-        graph_(graph),
-        instructions_(32, graph->zone()),
-        pointer_maps_(8, graph->zone()),
-        inlined_closures_(1, graph->zone()) { }
+  LChunk(CompilationInfo* info, HGraph* graph);
 
   int spill_slot_count_;
 
  private:
   CompilationInfo* info_;
   HGraph* const graph_;
+  BitVector* allocated_double_registers_;
   ZoneList<LInstruction*> instructions_;
   ZoneList<LPointerMap*> pointer_maps_;
   ZoneList<Handle<JSFunction> > inlined_closures_;
@@ -699,6 +708,14 @@ class LChunk: public ZoneObject {
 
 
 int ElementsKindToShiftSize(ElementsKind elements_kind);
+int StackSlotOffset(int index);
+
+enum NumberUntagDMode {
+  NUMBER_CANDIDATE_IS_SMI,
+  NUMBER_CANDIDATE_IS_SMI_OR_HOLE,
+  NUMBER_CANDIDATE_IS_SMI_CONVERT_HOLE,
+  NUMBER_CANDIDATE_IS_ANY_TAGGED
+};
 
 
 } }  // namespace v8::internal

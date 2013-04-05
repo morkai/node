@@ -22,11 +22,6 @@
 #ifndef UV_UNIX_H
 #define UV_UNIX_H
 
-#include "ngx-queue.h"
-
-#include "ev.h"
-#include "eio.h"
-
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -44,16 +39,6 @@
 #include <pthread.h>
 #include <signal.h>
 
-struct uv__io_s;
-struct uv_loop_s;
-
-typedef struct uv__io_s uv__io_t;
-typedef void (*uv__io_cb)(struct uv_loop_s* loop, uv__io_t* handle, int events);
-
-struct uv__io_s {
-  ev_io io_watcher;
-};
-
 #if defined(__linux__)
 # include "uv-linux.h"
 #elif defined(__sun)
@@ -66,6 +51,49 @@ struct uv__io_s {
       defined(__NetBSD__)
 # include "uv-bsd.h"
 #endif
+
+#ifndef UV_IO_PRIVATE_PLATFORM_FIELDS
+# define UV_IO_PRIVATE_PLATFORM_FIELDS /* empty */
+#endif
+
+#define UV_IO_PRIVATE_FIELDS                                                  \
+  UV_IO_PRIVATE_PLATFORM_FIELDS                                               \
+
+struct uv__io_s;
+struct uv__async;
+struct uv_loop_s;
+
+typedef void (*uv__io_cb)(struct uv_loop_s* loop,
+                          struct uv__io_s* w,
+                          unsigned int events);
+typedef struct uv__io_s uv__io_t;
+
+struct uv__io_s {
+  uv__io_cb cb;
+  void* pending_queue[2];
+  void* watcher_queue[2];
+  unsigned int pevents; /* Pending event mask i.e. mask at next tick. */
+  unsigned int events;  /* Current event mask. */
+  int fd;
+  UV_IO_PRIVATE_FIELDS
+};
+
+typedef void (*uv__async_cb)(struct uv_loop_s* loop,
+                             struct uv__async* w,
+                             unsigned int nevents);
+
+struct uv__async {
+  uv__async_cb cb;
+  uv__io_t io_watcher;
+  int wfd;
+};
+
+struct uv__work {
+  void (*work)(struct uv__work *w);
+  void (*done)(struct uv__work *w, int status);
+  struct uv_loop_s* loop;
+  void* wq[2];
+};
 
 #ifndef UV_PLATFORM_SEM_T
 # define UV_PLATFORM_SEM_T sem_t
@@ -91,7 +119,6 @@ typedef struct {
 
 typedef int uv_file;
 typedef int uv_os_sock_t;
-typedef struct stat uv_statbuf_t;
 
 #define UV_ONCE_INIT PTHREAD_ONCE_INIT
 
@@ -100,6 +127,24 @@ typedef pthread_t uv_thread_t;
 typedef pthread_mutex_t uv_mutex_t;
 typedef pthread_rwlock_t uv_rwlock_t;
 typedef UV_PLATFORM_SEM_T uv_sem_t;
+typedef pthread_cond_t uv_cond_t;
+
+
+#if defined(__APPLE__) && defined(__MACH__)
+
+typedef struct {
+  unsigned int n;
+  unsigned int count;
+  uv_mutex_t mutex;
+  uv_sem_t turnstile1;
+  uv_sem_t turnstile2;
+} uv_barrier_t;
+
+#else /* defined(__APPLE__) && defined(__MACH__) */
+
+typedef pthread_barrier_t uv_barrier_t;
+
+#endif /* defined(__APPLE__) && defined(__MACH__) */
 
 /* Platform-specific definitions for uv_spawn support. */
 typedef gid_t uv_gid_t;
@@ -115,29 +160,32 @@ typedef struct {
 
 #define UV_LOOP_PRIVATE_FIELDS                                                \
   unsigned long flags;                                                        \
-  /* Poll result queue */                                                     \
-  eio_channel uv_eio_channel;                                                 \
-  struct ev_loop* ev;                                                         \
-  /* Various thing for libeio. */                                             \
-  uv_async_t uv_eio_want_poll_notifier;                                       \
-  uv_async_t uv_eio_done_poll_notifier;                                       \
-  uv_idle_t uv_eio_poller;                                                    \
+  int backend_fd;                                                             \
+  void* pending_queue[2];                                                     \
+  void* watcher_queue[2];                                                     \
+  uv__io_t** watchers;                                                        \
+  unsigned int nwatchers;                                                     \
+  unsigned int nfds;                                                          \
+  void* wq[2];                                                                \
+  uv_mutex_t wq_mutex;                                                        \
+  uv_async_t wq_async;                                                        \
   uv_handle_t* closing_handles;                                               \
-  ngx_queue_t process_handles[1];                                             \
-  ngx_queue_t prepare_handles;                                                \
-  ngx_queue_t check_handles;                                                  \
-  ngx_queue_t idle_handles;                                                   \
-  ngx_queue_t async_handles;                                                  \
-  uv__io_t async_watcher;                                                     \
-  int async_pipefd[2];                                                        \
+  void* process_handles[1][2];                                                \
+  void* prepare_handles[2];                                                   \
+  void* check_handles[2];                                                     \
+  void* idle_handles[2];                                                      \
+  void* async_handles[2];                                                     \
+  struct uv__async async_watcher;                                             \
   /* RB_HEAD(uv__timers, uv_timer_s) */                                       \
   struct uv__timers {                                                         \
     struct uv_timer_s* rbh_root;                                              \
   } timer_handles;                                                            \
   uint64_t time;                                                              \
-  void* signal_ctx;                                                           \
+  int signal_pipefd[2];                                                       \
+  uv__io_t signal_io_watcher;                                                 \
   uv_signal_t child_watcher;                                                  \
   int emfile_fd;                                                              \
+  uint64_t timer_counter;                                                     \
   UV_PLATFORM_LOOP_FIELDS                                                     \
 
 #define UV_REQ_TYPE_PRIVATE /* empty */
@@ -147,7 +195,7 @@ typedef struct {
 #define UV_PRIVATE_REQ_TYPES /* empty */
 
 #define UV_WRITE_PRIVATE_FIELDS                                               \
-  ngx_queue_t queue;                                                          \
+  void* queue[2];                                                             \
   int write_index;                                                            \
   uv_buf_t* bufs;                                                             \
   int bufcnt;                                                                 \
@@ -155,12 +203,12 @@ typedef struct {
   uv_buf_t bufsml[4];                                                         \
 
 #define UV_CONNECT_PRIVATE_FIELDS                                             \
-  ngx_queue_t queue;                                                          \
+  void* queue[2];                                                             \
 
 #define UV_SHUTDOWN_PRIVATE_FIELDS /* empty */
 
 #define UV_UDP_SEND_PRIVATE_FIELDS                                            \
-  ngx_queue_t queue;                                                          \
+  void* queue[2];                                                             \
   struct sockaddr_in6 addr;                                                   \
   int bufcnt;                                                                 \
   uv_buf_t* bufs;                                                             \
@@ -175,53 +223,48 @@ typedef struct {
 #define UV_STREAM_PRIVATE_FIELDS                                              \
   uv_connect_t *connect_req;                                                  \
   uv_shutdown_t *shutdown_req;                                                \
-  uv__io_t read_watcher;                                                      \
-  uv__io_t write_watcher;                                                     \
-  ngx_queue_t write_queue;                                                    \
-  ngx_queue_t write_completed_queue;                                          \
+  uv__io_t io_watcher;                                                        \
+  void* write_queue[2];                                                       \
+  void* write_completed_queue[2];                                             \
   uv_connection_cb connection_cb;                                             \
   int delayed_error;                                                          \
   int accepted_fd;                                                            \
-  int fd;                                                                     \
   UV_STREAM_PRIVATE_PLATFORM_FIELDS                                           \
 
 #define UV_TCP_PRIVATE_FIELDS /* empty */
 
 #define UV_UDP_PRIVATE_FIELDS                                                 \
-  int fd;                                                                     \
   uv_alloc_cb alloc_cb;                                                       \
   uv_udp_recv_cb recv_cb;                                                     \
-  uv__io_t read_watcher;                                                      \
-  uv__io_t write_watcher;                                                     \
-  ngx_queue_t write_queue;                                                    \
-  ngx_queue_t write_completed_queue;                                          \
+  uv__io_t io_watcher;                                                        \
+  void* write_queue[2];                                                       \
+  void* write_completed_queue[2];                                             \
 
 #define UV_PIPE_PRIVATE_FIELDS                                                \
   const char* pipe_fname; /* strdup'ed */
 
 #define UV_POLL_PRIVATE_FIELDS                                                \
-  int fd;                                                                     \
   uv__io_t io_watcher;
 
 #define UV_PREPARE_PRIVATE_FIELDS                                             \
   uv_prepare_cb prepare_cb;                                                   \
-  ngx_queue_t queue;
+  void* queue[2];                                                             \
 
 #define UV_CHECK_PRIVATE_FIELDS                                               \
   uv_check_cb check_cb;                                                       \
-  ngx_queue_t queue;
+  void* queue[2];                                                             \
 
 #define UV_IDLE_PRIVATE_FIELDS                                                \
   uv_idle_cb idle_cb;                                                         \
-  ngx_queue_t queue;
+  void* queue[2];                                                             \
 
 #define UV_ASYNC_PRIVATE_FIELDS                                               \
-  volatile sig_atomic_t pending;                                              \
   uv_async_cb async_cb;                                                       \
-  ngx_queue_t queue;
+  void* queue[2];                                                             \
+  int pending;                                                                \
 
 #define UV_TIMER_PRIVATE_FIELDS                                               \
-  /* RB_ENTRY(uv_timer_s) node; */                                            \
+  /* RB_ENTRY(uv_timer_s) tree_entry; */                                      \
   struct {                                                                    \
     struct uv_timer_s* rbe_left;                                              \
     struct uv_timer_s* rbe_right;                                             \
@@ -230,9 +273,11 @@ typedef struct {
   } tree_entry;                                                               \
   uv_timer_cb timer_cb;                                                       \
   uint64_t timeout;                                                           \
-  uint64_t repeat;
+  uint64_t repeat;                                                            \
+  uint64_t start_id;
 
 #define UV_GETADDRINFO_PRIVATE_FIELDS                                         \
+  struct uv__work work_req;                                                   \
   uv_getaddrinfo_cb cb;                                                       \
   struct addrinfo* hints;                                                     \
   char* hostname;                                                             \
@@ -241,23 +286,41 @@ typedef struct {
   int retcode;
 
 #define UV_PROCESS_PRIVATE_FIELDS                                             \
-  ngx_queue_t queue;                                                          \
+  void* queue[2];                                                             \
   int errorno;                                                                \
 
 #define UV_FS_PRIVATE_FIELDS                                                  \
-  struct stat statbuf;                                                        \
+  const char *new_path;                                                       \
   uv_file file;                                                               \
-  eio_req* eio;                                                               \
+  int flags;                                                                  \
+  mode_t mode;                                                                \
+  void* buf;                                                                  \
+  size_t len;                                                                 \
+  off_t off;                                                                  \
+  uid_t uid;                                                                  \
+  gid_t gid;                                                                  \
+  double atime;                                                               \
+  double mtime;                                                               \
+  struct uv__work work_req;                                                   \
 
 #define UV_WORK_PRIVATE_FIELDS                                                \
-  eio_req* eio;
+  struct uv__work work_req;
 
 #define UV_TTY_PRIVATE_FIELDS                                                 \
   struct termios orig_termios;                                                \
   int mode;
 
 #define UV_SIGNAL_PRIVATE_FIELDS                                              \
-  ngx_queue_t queue;
+  /* RB_ENTRY(uv_signal_s) tree_entry; */                                     \
+  struct {                                                                    \
+    struct uv_signal_s* rbe_left;                                             \
+    struct uv_signal_s* rbe_right;                                            \
+    struct uv_signal_s* rbe_parent;                                           \
+    int rbe_color;                                                            \
+  } tree_entry;                                                               \
+  /* Use two counters here so we don have to fiddle with atomics. */          \
+  unsigned int caught_signals;                                                \
+  unsigned int dispatched_signals;
 
 #define UV_FS_EVENT_PRIVATE_FIELDS                                            \
   uv_fs_event_cb cb;                                                          \

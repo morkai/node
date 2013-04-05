@@ -3,7 +3,7 @@ npm-faq(1) -- Frequently Asked Questions
 
 ## Where can I find these docs in HTML?
 
-<http://npmjs.org/doc/>, or run:
+<https://npmjs.org/doc/>, or run:
 
     npm config set viewer browser
 
@@ -71,6 +71,52 @@ program that uses it.
 Write your own package manager, then.  It's not that hard.
 
 npm will not help you do something that is known to be a bad idea.
+
+## `"node_modules"` is the name of my deity's arch-rival, and a Forbidden Word in my religion.  Can I configure npm to use a different folder?
+
+No.  This will never happen.  This question comes up sometimes,
+because it seems silly from the outside that npm couldn't just be
+configured to put stuff somewhere else, and then npm could load them
+from there.  It's an arbitrary spelling choice, right?  What's the big
+deal?
+
+At the time of this writing, the string `'node_modules'` appears 151
+times in 53 separate files in npm and node core (excluding tests and
+documentation).
+
+Some of these references are in node's built-in module loader.  Since
+npm is not involved **at all** at run-time, node itself would have to
+be configured to know where you've decided to stick stuff.  Complexity
+hurdle #1.  Since the Node module system is locked, this cannot be
+changed, and is enough to kill this request.  But I'll continue, in
+deference to your deity's delicate feelings regarding spelling.
+
+Many of the others are in dependencies that npm uses, which are not
+necessarily tightly coupled to npm (in the sense that they do not read
+npm's configuration files, etc.)  Each of these would have to be
+configured to take the name of the `node_modules` folder as a
+parameter.  Complexity hurdle #2.
+
+Furthermore, npm has the ability to "bundle" dependencies by adding
+the dep names to the `"bundledDependencies"` list in package.json,
+which causes the folder to be included in the package tarball.  What
+if the author of a module bundles its dependencies, and they use a
+different spelling for `node_modules`?  npm would have to rename the
+folder at publish time, and then be smart enough to unpack it using
+your locally configured name.  Complexity hurdle #3.
+
+Furthermore, what happens when you *change* this name?  Fine, it's
+easy enough the first time, just rename the `node_modules` folders to
+`./blergyblerp/` or whatever name you choose.  But what about when you
+change it again?  npm doesn't currently track any state about past
+configuration settings, so this would be rather difficult to do
+properly.  It would have to track every previous value for this
+config, and always accept any of them, or else yesterday's install may
+be broken tomorrow.  Complexity hurdle #5.
+
+Never going to happen.  The folder is named `node_modules`.  It is
+written indelibly in the Node Way, handed down from the ancient times
+of Node 0.3.
 
 ## Should I check my `node_modules` folder into git?
 
@@ -144,7 +190,7 @@ command.)
 
 In those cases, you can do this:
 
-    curl http://npmjs.org/install.sh | sh
+    curl https://npmjs.org/install.sh | sh
 
 ## What is a `package`?
 
@@ -177,9 +223,9 @@ an argument to `git checkout`.  The default is `master`.
 
 You don't.  Try one of these:
 
-* <http://github.com/isaacs/nave>
-* <http://github.com/visionmedia/n>
-* <http://github.com/creationix/nvm>
+* <https://github.com/isaacs/nave>
+* <https://github.com/visionmedia/n>
+* <https://github.com/creationix/nvm>
 
 ## How can I use npm for development?
 
@@ -245,7 +291,7 @@ There is not sufficient need to impose namespace rules on everyone.
 Discuss it on the mailing list, or post an issue.
 
 * <npm-@googlegroups.com>
-* <http://github.com/isaacs/npm/issues>
+* <https://github.com/isaacs/npm/issues>
 
 ## Why does npm hate me?
 

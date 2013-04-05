@@ -59,10 +59,33 @@ In busy processes, the programmer is _strongly encouraged_ to use the
 asynchronous versions of these calls. The synchronous versions will block
 the entire process until they complete--halting all connections.
 
-Relative path to filename can be used, remember however that this path will be relative
-to `process.cwd()`.
+Relative path to filename can be used, remember however that this path will be
+relative to `process.cwd()`.
 
-## fs.rename(oldPath, newPath, [callback])
+Most fs functions let you omit the callback argument. If you do, a default
+callback is used that rethrows errors. To get a trace to the original call
+site, set the NODE_DEBUG environment variable:
+
+    $ cat script.js
+    function bad() {
+      require('fs').readFile('/');
+    }
+    bad();
+
+    $ env NODE_DEBUG=fs node script.js
+    fs.js:66
+            throw err;
+                  ^
+    Error: EISDIR, read
+        at rethrow (fs.js:61:21)
+        at maybeCallback (fs.js:79:42)
+        at Object.fs.readFile (fs.js:153:18)
+        at bad (/path/to/script.js:2:17)
+        at Object.<anonymous> (/path/to/script.js:5:1)
+        <etc.>
+
+
+## fs.rename(oldPath, newPath, callback)
 
 Asynchronous rename(2). No arguments other than a possible exception are given
 to the completion callback.
@@ -71,7 +94,7 @@ to the completion callback.
 
 Synchronous rename(2).
 
-## fs.ftruncate(fd, len, [callback])
+## fs.ftruncate(fd, len, callback)
 
 Asynchronous ftruncate(2). No arguments other than a possible exception are
 given to the completion callback.
@@ -80,7 +103,7 @@ given to the completion callback.
 
 Synchronous ftruncate(2).
 
-## fs.truncate(path, len, [callback])
+## fs.truncate(path, len, callback)
 
 Asynchronous truncate(2). No arguments other than a possible exception are
 given to the completion callback.
@@ -89,7 +112,7 @@ given to the completion callback.
 
 Synchronous truncate(2).
 
-## fs.chown(path, uid, gid, [callback])
+## fs.chown(path, uid, gid, callback)
 
 Asynchronous chown(2). No arguments other than a possible exception are given
 to the completion callback.
@@ -98,7 +121,7 @@ to the completion callback.
 
 Synchronous chown(2).
 
-## fs.fchown(fd, uid, gid, [callback])
+## fs.fchown(fd, uid, gid, callback)
 
 Asynchronous fchown(2). No arguments other than a possible exception are given
 to the completion callback.
@@ -107,7 +130,7 @@ to the completion callback.
 
 Synchronous fchown(2).
 
-## fs.lchown(path, uid, gid, [callback])
+## fs.lchown(path, uid, gid, callback)
 
 Asynchronous lchown(2). No arguments other than a possible exception are given
 to the completion callback.
@@ -116,7 +139,7 @@ to the completion callback.
 
 Synchronous lchown(2).
 
-## fs.chmod(path, mode, [callback])
+## fs.chmod(path, mode, callback)
 
 Asynchronous chmod(2). No arguments other than a possible exception are given
 to the completion callback.
@@ -125,7 +148,7 @@ to the completion callback.
 
 Synchronous chmod(2).
 
-## fs.fchmod(fd, mode, [callback])
+## fs.fchmod(fd, mode, callback)
 
 Asynchronous fchmod(2). No arguments other than a possible exception
 are given to the completion callback.
@@ -134,7 +157,7 @@ are given to the completion callback.
 
 Synchronous fchmod(2).
 
-## fs.lchmod(path, mode, [callback])
+## fs.lchmod(path, mode, callback)
 
 Asynchronous lchmod(2). No arguments other than a possible exception
 are given to the completion callback.
@@ -145,20 +168,20 @@ Only available on Mac OS X.
 
 Synchronous lchmod(2).
 
-## fs.stat(path, [callback])
+## fs.stat(path, callback)
 
 Asynchronous stat(2). The callback gets two arguments `(err, stats)` where
 `stats` is a [fs.Stats](#fs_class_fs_stats) object.  See the [fs.Stats](#fs_class_fs_stats)
 section below for more information.
 
-## fs.lstat(path, [callback])
+## fs.lstat(path, callback)
 
 Asynchronous lstat(2). The callback gets two arguments `(err, stats)` where
 `stats` is a `fs.Stats` object. `lstat()` is identical to `stat()`, except that if
 `path` is a symbolic link, then the link itself is stat-ed, not the file that it
 refers to.
 
-## fs.fstat(fd, [callback])
+## fs.fstat(fd, callback)
 
 Asynchronous fstat(2). The callback gets two arguments `(err, stats)` where
 `stats` is a `fs.Stats` object. `fstat()` is identical to `stat()`, except that
@@ -176,7 +199,7 @@ Synchronous lstat(2). Returns an instance of `fs.Stats`.
 
 Synchronous fstat(2). Returns an instance of `fs.Stats`.
 
-## fs.link(srcpath, dstpath, [callback])
+## fs.link(srcpath, dstpath, callback)
 
 Asynchronous link(2). No arguments other than a possible exception are given to
 the completion callback.
@@ -185,7 +208,7 @@ the completion callback.
 
 Synchronous link(2).
 
-## fs.symlink(srcpath, dstpath, [type], [callback])
+## fs.symlink(srcpath, dstpath, [type], callback)
 
 Asynchronous symlink(2). No arguments other than a possible exception are given
 to the completion callback.
@@ -198,7 +221,7 @@ Note that Windows junction points require the destination path to be absolute.  
 
 Synchronous symlink(2).
 
-## fs.readlink(path, [callback])
+## fs.readlink(path, callback)
 
 Asynchronous readlink(2). The callback gets two arguments `(err,
 linkString)`.
@@ -226,7 +249,7 @@ Example:
 
 Synchronous realpath(2). Returns the resolved path.
 
-## fs.unlink(path, [callback])
+## fs.unlink(path, callback)
 
 Asynchronous unlink(2). No arguments other than a possible exception are given
 to the completion callback.
@@ -235,7 +258,7 @@ to the completion callback.
 
 Synchronous unlink(2).
 
-## fs.rmdir(path, [callback])
+## fs.rmdir(path, callback)
 
 Asynchronous rmdir(2). No arguments other than a possible exception are given
 to the completion callback.
@@ -244,7 +267,7 @@ to the completion callback.
 
 Synchronous rmdir(2).
 
-## fs.mkdir(path, [mode], [callback])
+## fs.mkdir(path, [mode], callback)
 
 Asynchronous mkdir(2). No arguments other than a possible exception are given
 to the completion callback. `mode` defaults to `0777`.
@@ -253,7 +276,7 @@ to the completion callback. `mode` defaults to `0777`.
 
 Synchronous mkdir(2).
 
-## fs.readdir(path, [callback])
+## fs.readdir(path, callback)
 
 Asynchronous readdir(3).  Reads the contents of a directory.
 The callback gets two arguments `(err, files)` where `files` is an array of
@@ -264,7 +287,7 @@ the names of the files in the directory excluding `'.'` and `'..'`.
 Synchronous readdir(3). Returns an array of filenames excluding `'.'` and
 `'..'`.
 
-## fs.close(fd, [callback])
+## fs.close(fd, callback)
 
 Asynchronous close(2).  No arguments other than a possible exception are given
 to the completion callback.
@@ -273,7 +296,7 @@ to the completion callback.
 
 Synchronous close(2).
 
-## fs.open(path, flags, [mode], [callback])
+## fs.open(path, flags, [mode], callback)
 
 Asynchronous file open. See open(2). `flags` can be:
 
@@ -326,18 +349,18 @@ not followed. Exclusive mode may or may not work with network file systems.
 
 Synchronous open(2).
 
-## fs.utimes(path, atime, mtime, [callback])
+## fs.utimes(path, atime, mtime, callback)
 ## fs.utimesSync(path, atime, mtime)
 
 Change file timestamps of the file referenced by the supplied path.
 
-## fs.futimes(fd, atime, mtime, [callback])
+## fs.futimes(fd, atime, mtime, callback)
 ## fs.futimesSync(fd, atime, mtime)
 
 Change the file timestamps of a file referenced by the supplied file
 descriptor.
 
-## fs.fsync(fd, [callback])
+## fs.fsync(fd, callback)
 
 Asynchronous fsync(2). No arguments other than a possible exception are given
 to the completion callback.
@@ -346,7 +369,7 @@ to the completion callback.
 
 Synchronous fsync(2).
 
-## fs.write(fd, buffer, offset, length, position, [callback])
+## fs.write(fd, buffer, offset, length, position, callback)
 
 Write `buffer` to the file specified by `fd`.
 
@@ -368,13 +391,13 @@ without waiting for the callback. For this scenario,
 
 Synchronous version of `fs.write()`. Returns the number of bytes written.
 
-## fs.read(fd, buffer, offset, length, position, [callback])
+## fs.read(fd, buffer, offset, length, position, callback)
 
 Read data from the file specified by `fd`.
 
 `buffer` is the buffer that the data will be written to.
 
-`offset` is offset within the buffer where writing will start.
+`offset` is offset within the buffer where reading will start.
 
 `length` is an integer specifying the number of bytes to read.
 
@@ -387,7 +410,13 @@ The callback is given the three arguments, `(err, bytesRead, buffer)`.
 
 Synchronous version of `fs.read`. Returns the number of `bytesRead`.
 
-## fs.readFile(filename, [encoding], [callback])
+## fs.readFile(filename, [options], callback)
+
+* `filename` {String}
+* `options` {Object}
+  * `encoding` {String | Null} default = `null`
+  * `flag` {String} default = `'r'`
+* `callback` {Function}
 
 Asynchronously reads the entire contents of a file. Example:
 
@@ -402,19 +431,29 @@ contents of the file.
 If no encoding is specified, then the raw buffer is returned.
 
 
-## fs.readFileSync(filename, [encoding])
+## fs.readFileSync(filename, [options])
 
 Synchronous version of `fs.readFile`. Returns the contents of the `filename`.
 
-If `encoding` is specified then this function returns a string. Otherwise it
-returns a buffer.
+If the `encoding` option is specified then this function returns a
+string. Otherwise it returns a buffer.
 
 
-## fs.writeFile(filename, data, [encoding], [callback])
+## fs.writeFile(filename, data, [options], callback)
+
+* `filename` {String}
+* `data` {String | Buffer}
+* `options` {Object}
+  * `encoding` {String | Null} default = `'utf8'`
+  * `mode` {Number} default = `438` (aka `0666` in Octal)
+  * `flag` {String} default = `'w'`
+* `callback` {Function}
 
 Asynchronously writes data to a file, replacing the file if it already exists.
-`data` can be a string or a buffer. The `encoding` argument is ignored if
-`data` is a buffer. It defaults to `'utf8'`.
+`data` can be a string or a buffer.
+
+The `encoding` option is ignored if `data` is a buffer. It defaults
+to `'utf8'`.
 
 Example:
 
@@ -423,15 +462,22 @@ Example:
       console.log('It\'s saved!');
     });
 
-## fs.writeFileSync(filename, data, [encoding])
+## fs.writeFileSync(filename, data, [options])
 
 The synchronous version of `fs.writeFile`.
 
-## fs.appendFile(filename, data, encoding='utf8', [callback])
+## fs.appendFile(filename, data, [options], callback)
+
+* `filename` {String}
+* `data` {String | Buffer}
+* `options` {Object}
+  * `encoding` {String | Null} default = `'utf8'`
+  * `mode` {Number} default = `438` (aka `0666` in Octal)
+  * `flag` {String} default = `'a'`
+* `callback` {Function}
 
 Asynchronously append data to a file, creating the file if it not yet exists.
-`data` can be a string or a buffer. The `encoding` argument is ignored if
-`data` is a buffer.
+`data` can be a string or a buffer.
 
 Example:
 
@@ -440,7 +486,7 @@ Example:
       console.log('The "data to append" was appended to file!');
     });
 
-## fs.appendFileSync(filename, data, encoding='utf8')
+## fs.appendFileSync(filename, data, [options])
 
 The synchronous version of `fs.appendFile`.
 
@@ -543,7 +589,7 @@ callback, and have some fallback logic if it is null.
       }
     });
 
-## fs.exists(path, [callback])
+## fs.exists(path, callback)
 
 Test whether or not the given path exists by checking with the file system.
 Then call the `callback` argument with either true or false.  Example:
@@ -611,12 +657,19 @@ Returns a new ReadStream object (See `Readable Stream`).
       encoding: null,
       fd: null,
       mode: 0666,
-      bufferSize: 64 * 1024
+      bufferSize: 64 * 1024,
+      autoClose: true
     }
 
 `options` can include `start` and `end` values to read a range of bytes from
 the file instead of the entire file.  Both `start` and `end` are inclusive and
 start at 0. The `encoding` can be `'utf8'`, `'ascii'`, or `'base64'`.
+
+If `autoClose` is false, then the file descriptor won't be closed, even if
+there's an error.  It is your responsibility to close it and make sure
+there's no file descriptor leak.  If `autoClose` is set to true (default
+behavior), on `error` or `end` the file descriptor will be closed
+automatically.
 
 An example to read the last 10 bytes of a file which is 100 bytes long:
 

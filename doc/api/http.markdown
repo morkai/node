@@ -56,7 +56,7 @@ This is an [EventEmitter][] with the following events:
 
 Emitted each time there is a request. Note that there may be multiple requests
 per connection (in the case of keep-alive connections).
- `request` is an instance of `http.ServerRequest` and `response` is
+ `request` is an instance of `http.IncomingMessage` and `response` is
  an instance of `http.ServerResponse`
 
 ### Event: 'connection'
@@ -127,9 +127,12 @@ sent to the server on that socket.
 
 ### Event: 'clientError'
 
-`function (exception) { }`
+`function (exception, socket) { }`
 
 If a client connection emits an 'error' event - it will forwarded here.
+
+`socket` is the `net.Socket` object that the error originated from.
+
 
 ### server.listen(port, [hostname], [backlog], [callback])
 
@@ -156,10 +159,10 @@ This function is asynchronous. The last parameter `callback` will be added as
 a listener for the ['listening'][] event.  See also [net.Server.listen(path)][].
 
 
-### server.listen(handle, [listeningListener])
+### server.listen(handle, [callback])
 
 * `handle` {Object}
-* `listeningListener` {Function}
+* `callback` {Function}
 
 The `handle` object can be set to either a server or socket (anything
 with an underlying `_handle` member), or a `{fd: <n>}` object.
@@ -172,9 +175,9 @@ Listening on a file descriptor is not supported on Windows.
 
 This function is asynchronous. The last parameter `callback` will be added as
 a listener for the ['listening'](net.html#event_listening_) event.
-See also [net.Server.listen()](net.html#server.listen).
+See also [net.Server.listen()](net.html#net_server_listen_handle_callback).
 
-### server.close([cb])
+### server.close([callback])
 
 Stops the server from accepting new connections.  See [net.Server.close()][].
 
@@ -184,134 +187,36 @@ Stops the server from accepting new connections.  See [net.Server.close()][].
 Limits maximum incoming headers count, equal to 1000 by default. If set to 0 -
 no limit will be applied.
 
+### server.setTimeout(msecs, callback)
 
-## Class: http.ServerRequest
+* `msecs` {Number}
+* `callback` {Function}
 
-This object is created internally by a HTTP server -- not by
-the user -- and passed as the first argument to a `'request'` listener.
+Sets the timeout value for sockets, and emits a `'timeout'` event on
+the Server object, passing the socket as an argument, if a timeout
+occurs.
 
-The request implements the [Readable Stream][] interface. This is an
-[EventEmitter][] with the following events:
+If there is a `'timeout'` event listener on the Server object, then it
+will be called with the timed-out socket as an argument.
 
-### Event: 'data'
+By default, the Server's timeout value is 2 minutes, and sockets are
+destroyed automatically if they time out.  However, if you assign a
+callback to the Server's `'timeout'` event, then you are responsible
+for handling socket timeouts.
 
-`function (chunk) { }`
+### server.timeout
 
-Emitted when a piece of the message body is received. The chunk is a string if
-an encoding has been set with `request.setEncoding()`, otherwise it's a
-[Buffer][].
+* {Number} Default = 120000 (2 minutes)
 
-Note that the __data will be lost__ if there is no listener when a
-`ServerRequest` emits a `'data'` event.
+The number of milliseconds of inactivity before a socket is presumed
+to have timed out.
 
-### Event: 'end'
+Note that the socket timeout logic is set up on connection, so
+changing this value only affects *new* connections to the server, not
+any existing connections.
 
-`function () { }`
-
-Emitted exactly once for each request. After that, no more `'data'` events
-will be emitted on the request.
-
-### Event: 'close'
-
-`function () { }`
-
-Indicates that the underlaying connection was terminated before
-`response.end()` was called or able to flush.
-
-Just like `'end'`, this event occurs only once per request, and no more `'data'`
-events will fire afterwards.
-
-Note: `'close'` can fire after `'end'`, but not vice versa.
-
-### request.method
-
-The request method as a string. Read only. Example:
-`'GET'`, `'DELETE'`.
-
-
-### request.url
-
-Request URL string. This contains only the URL that is
-present in the actual HTTP request. If the request is:
-
-    GET /status?name=ryan HTTP/1.1\r\n
-    Accept: text/plain\r\n
-    \r\n
-
-Then `request.url` will be:
-
-    '/status?name=ryan'
-
-If you would like to parse the URL into its parts, you can use
-`require('url').parse(request.url)`.  Example:
-
-    node> require('url').parse('/status?name=ryan')
-    { href: '/status?name=ryan',
-      search: '?name=ryan',
-      query: 'name=ryan',
-      pathname: '/status' }
-
-If you would like to extract the params from the query string,
-you can use the `require('querystring').parse` function, or pass
-`true` as the second argument to `require('url').parse`.  Example:
-
-    node> require('url').parse('/status?name=ryan', true)
-    { href: '/status?name=ryan',
-      search: '?name=ryan',
-      query: { name: 'ryan' },
-      pathname: '/status' }
-
-
-
-### request.headers
-
-Read only map of header names and values. Header names are lower-cased.
-Example:
-
-    // Prints something like:
-    //
-    // { 'user-agent': 'curl/7.22.0',
-    //   host: '127.0.0.1:8000',
-    //   accept: '*/*' }
-    console.log(request.headers);
-
-
-### request.trailers
-
-Read only; HTTP trailers (if present). Only populated after the 'end' event.
-
-### request.httpVersion
-
-The HTTP protocol version as a string. Read only. Examples:
-`'1.1'`, `'1.0'`.
-Also `request.httpVersionMajor` is the first integer and
-`request.httpVersionMinor` is the second.
-
-
-### request.setEncoding([encoding])
-
-Set the encoding for the request body. See [stream.setEncoding()][] for more
-information.
-
-### request.pause()
-
-Pauses request from emitting events.  Useful to throttle back an upload.
-
-
-### request.resume()
-
-Resumes a paused request.
-
-### request.connection
-
-The `net.Socket` object associated with the connection.
-
-
-With HTTPS support, use request.connection.verifyPeer() and
-request.connection.getPeerCertificate() to obtain the client's
-authentication details.
-
-
+Set to 0 to disable any kind of automatic timeout behavior on incoming
+connections.
 
 ## Class: http.ServerResponse
 
@@ -325,7 +230,7 @@ The response implements the [Writable Stream][] interface. This is an
 
 `function () { }`
 
-Indicates that the underlaying connection was terminated before
+Indicates that the underlying connection was terminated before
 `response.end()` was called or able to flush.
 
 ### response.writeContinue()
@@ -359,6 +264,21 @@ If the body contains higher coded characters then `Buffer.byteLength()`
 should be used to determine the number of bytes in a given encoding.
 And Node does not check whether Content-Length and the length of the body
 which has been transmitted are equal or not.
+
+### response.setTimeout(msecs, callback)
+
+* `msecs` {Number}
+* `callback` {Function}
+
+Sets the Socket's timeout value to `msecs`.  If a callback is
+provided, then it is added as a listener on the `'timeout'` event on
+the response object.
+
+If no `'timeout'` listener is added to the request, the response, or
+the server, then sockets are destroyed when they time out.  If you
+assign a handler on the request, the response, or the server's
+`'timeout'` events, then it is your responsibility to handle timed out
+sockets.
 
 ### response.statusCode
 
@@ -509,7 +429,7 @@ upload a file with a POST request, then write to the `ClientRequest` object.
 Example:
 
     var options = {
-      host: 'www.google.com',
+      hostname: 'www.google.com',
       port: 80,
       path: '/upload',
       method: 'POST'
@@ -598,7 +518,7 @@ pool you can do something along the lines of:
 
 Alternatively, you could just opt out of pooling entirely using `agent:false`:
 
-    http.get({host:'localhost', port:80, path:'/', agent:false}, function (res) {
+    http.get({hostname:'localhost', port:80, path:'/', agent:false}, function (res) {
       // Do stuff
     })
 
@@ -634,7 +554,7 @@ data chunk or when closing the connection.
 To get the response, add a listener for `'response'` to the request object.
 `'response'` will be emitted from the request object when the response
 headers have been received.  The `'response'` event is executed with one
-argument which is an instance of `http.ClientResponse`.
+argument which is an instance of `http.IncomingMessage`.
 
 During the `'response'` event, one can add listeners to the
 response object; particularly to listen for the `'data'` event. Note that
@@ -671,7 +591,7 @@ The request implements the [Writable Stream][] interface. This is an
 `function (response) { }`
 
 Emitted when a response is received to this request. This event is emitted only
-once. The `response` argument will be an instance of `http.ClientResponse`.
+once. The `response` argument will be an instance of `http.IncomingMessage`.
 
 Options:
 
@@ -723,7 +643,7 @@ A client server pair that show you how to listen for the `connect` event.
       // make a request to a tunneling proxy
       var options = {
         port: 1337,
-        host: '127.0.0.1',
+        hostname: '127.0.0.1',
         method: 'CONNECT',
         path: 'www.google.com:80'
       };
@@ -780,7 +700,7 @@ A client server pair that show you how to listen for the `upgrade` event.
       // make a request
       var options = {
         port: 1337,
-        host: '127.0.0.1',
+        hostname: '127.0.0.1',
         headers: {
           'Connection': 'Upgrade',
           'Upgrade': 'websocket'
@@ -847,71 +767,149 @@ Once a socket is assigned to this request and is connected
 Once a socket is assigned to this request and is connected
 [socket.setKeepAlive()][] will be called.
 
-## http.ClientResponse
 
-This object is created when making a request with `http.request()`. It is
-passed to the `'response'` event of the request object.
+## http.IncomingMessage
 
-The response implements the [Readable Stream][] interface. This is an
+An `IncomingMessage` object is created by `http.Server` or `http.ClientRequest`
+and passed as the first argument to the `'request'` and `'response'` event
+respectively. It may be used to access response status, headers and data.
+
+It implements the [Readable Stream][] interface. `http.IncomingMessage` is an
 [EventEmitter][] with the following events:
-
 
 ### Event: 'data'
 
 `function (chunk) { }`
 
-Emitted when a piece of the message body is received.
+Emitted when a piece of the message body is received. The chunk is a string if
+an encoding has been set with `message.setEncoding()`, otherwise it's
+a [Buffer][].
 
 Note that the __data will be lost__ if there is no listener when a
-`ClientResponse` emits a `'data'` event.
-
+`IncomingMessage` emits a `'data'` event.
 
 ### Event: 'end'
 
 `function () { }`
 
-Emitted exactly once for each message. No arguments. After
-emitted no other events will be emitted on the response.
+Emitted exactly once for each response. After that, no more `'data'` events
+will be emitted on the response.
 
 ### Event: 'close'
 
-`function (err) { }`
+`function () { }`
 
 Indicates that the underlaying connection was terminated before
-`end` event was emitted.
-See [http.ServerRequest][]'s `'close'` event for more information.
+`response.end()` was called or able to flush.
 
-### response.statusCode
+Just like `'end'`, this event occurs only once per response, and no more
+`'data'` events will fire afterwards. See [http.ServerResponse][]'s `'close'`
+event for more information.
 
-The 3-digit HTTP response status code. E.G. `404`.
+### message.httpVersion
 
-### response.httpVersion
+In case of server request, the HTTP version sent by the client. In the case of
+client response, the HTTP version of the connected-to server.
+Probably either `'1.1'` or `'1.0'`.
 
-The HTTP version of the connected-to server. Probably either
-`'1.1'` or `'1.0'`.
 Also `response.httpVersionMajor` is the first integer and
 `response.httpVersionMinor` is the second.
 
-### response.headers
+### message.headers
 
-The response headers object.
+The request/response headers object.
 
-### response.trailers
+Read only map of header names and values. Header names are lower-cased.
+Example:
 
-The response trailers object. Only populated after the 'end' event.
+    // Prints something like:
+    //
+    // { 'user-agent': 'curl/7.22.0',
+    //   host: '127.0.0.1:8000',
+    //   accept: '*/*' }
+    console.log(request.headers);
 
-### response.setEncoding([encoding])
+### message.trailers
 
-Set the encoding for the response body. See [stream.setEncoding()][] for more
+The request/response trailers object. Only populated after the 'end' event.
+
+### message.setTimeout(msecs, callback)
+
+* `msecs` {Number}
+* `callback` {Function}
+
+Calls `message.connection.setTimeout(msecs, callback)`.
+
+### message.setEncoding([encoding])
+
+Set the encoding for data emitted by the `'data'` event. See [stream.setEncoding()][] for more
 information.
 
-### response.pause()
+Should be set before any `'data'` events have been emitted.
 
-Pauses response from emitting events.  Useful to throttle back a download.
+### message.pause()
 
-### response.resume()
+Pauses request/response from emitting events.  Useful to throttle back a download.
 
-Resumes a paused response.
+### message.resume()
+
+Resumes a paused request/response.
+
+### message.method
+
+**Only valid for request obtained from `http.Server`.**
+
+The request method as a string. Read only. Example:
+`'GET'`, `'DELETE'`.
+
+### message.url
+
+**Only valid for request obtained from `http.Server`.**
+
+Request URL string. This contains only the URL that is
+present in the actual HTTP request. If the request is:
+
+    GET /status?name=ryan HTTP/1.1\r\n
+    Accept: text/plain\r\n
+    \r\n
+
+Then `request.url` will be:
+
+    '/status?name=ryan'
+
+If you would like to parse the URL into its parts, you can use
+`require('url').parse(request.url)`.  Example:
+
+    node> require('url').parse('/status?name=ryan')
+    { href: '/status?name=ryan',
+      search: '?name=ryan',
+      query: 'name=ryan',
+      pathname: '/status' }
+
+If you would like to extract the params from the query string,
+you can use the `require('querystring').parse` function, or pass
+`true` as the second argument to `require('url').parse`.  Example:
+
+    node> require('url').parse('/status?name=ryan', true)
+    { href: '/status?name=ryan',
+      search: '?name=ryan',
+      query: { name: 'ryan' },
+      pathname: '/status' }
+
+### message.statusCode
+
+**Only valid for response obtained from `http.ClientRequest`.**
+
+The 3-digit HTTP response status code. E.G. `404`.
+
+### message.socket
+
+The `net.Socket` object associated with the connection.
+
+With HTTPS support, use request.connection.verifyPeer() and
+request.connection.getPeerCertificate() to obtain the client's
+authentication details.
+
 
 [Agent]: #http_class_http_agent
 ['checkContinue']: #http_event_checkcontinue
@@ -919,11 +917,11 @@ Resumes a paused response.
 [EventEmitter]: events.html#events_class_events_eventemitter
 [global Agent]: #http_http_globalagent
 [http.request()]: #http_http_request_options_callback
-[http.ServerRequest]: #http_class_http_serverrequest
+[http.IncomingMessage]: #http_class_http_incomingmessage
 ['listening']: net.html#net_event_listening
-[net.Server.close()]: net.html#net_server_close_cb
-[net.Server.listen(path)]: net.html#net_server_listen_path_listeninglistener
-[net.Server.listen(port)]: net.html#net_server_listen_port_host_backlog_listeninglistener
+[net.Server.close()]: net.html#net_server_close_callback
+[net.Server.listen(path)]: net.html#net_server_listen_path_callback
+[net.Server.listen(port)]: net.html#net_server_listen_port_host_backlog_callback
 [Readable Stream]: stream.html#stream_readable_stream
 [socket.setKeepAlive()]: net.html#net_socket_setkeepalive_enable_initialdelay
 [socket.setNoDelay()]: net.html#net_socket_setnodelay_nodelay

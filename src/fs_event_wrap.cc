@@ -51,7 +51,7 @@ private:
 
 FSEventWrap::FSEventWrap(Handle<Object> object): HandleWrap(object,
                                                     (uv_handle_t*)&handle_) {
-  handle_.data = reinterpret_cast<void*>(this);
+  handle_.data = static_cast<void*>(this);
   initialized_ = false;
 }
 
@@ -64,7 +64,7 @@ FSEventWrap::~FSEventWrap() {
 void FSEventWrap::Initialize(Handle<Object> target) {
   HandleWrap::Initialize(target);
 
-  HandleScope scope;
+  HandleScope scope(node_isolate);
 
   Local<FunctionTemplate> t = FunctionTemplate::New(New);
   t->InstanceTemplate()->SetInternalFieldCount(1);
@@ -74,12 +74,13 @@ void FSEventWrap::Initialize(Handle<Object> target) {
   NODE_SET_PROTOTYPE_METHOD(t, "close", Close);
 
   target->Set(String::NewSymbol("FSEvent"),
-              Persistent<FunctionTemplate>::New(t)->GetFunction());
+              Persistent<FunctionTemplate>::New(node_isolate,
+                                                t)->GetFunction());
 }
 
 
 Handle<Value> FSEventWrap::New(const Arguments& args) {
-  HandleScope scope;
+  HandleScope scope(node_isolate);
 
   assert(args.IsConstructCall());
   new FSEventWrap(args.This());
@@ -89,7 +90,7 @@ Handle<Value> FSEventWrap::New(const Arguments& args) {
 
 
 Handle<Value> FSEventWrap::Start(const Arguments& args) {
-  HandleScope scope;
+  HandleScope scope(node_isolate);
 
   UNWRAP(FSEventWrap)
 
@@ -110,16 +111,16 @@ Handle<Value> FSEventWrap::Start(const Arguments& args) {
     SetErrno(uv_last_error(uv_default_loop()));
   }
 
-  return scope.Close(Integer::New(r));
+  return scope.Close(Integer::New(r, node_isolate));
 }
 
 
 void FSEventWrap::OnEvent(uv_fs_event_t* handle, const char* filename,
     int events, int status) {
-  HandleScope scope;
+  HandleScope scope(node_isolate);
   Local<String> eventStr;
 
-  FSEventWrap* wrap = reinterpret_cast<FSEventWrap*>(handle->data);
+  FSEventWrap* wrap = static_cast<FSEventWrap*>(handle->data);
 
   assert(wrap->object_.IsEmpty() == false);
 
@@ -136,7 +137,7 @@ void FSEventWrap::OnEvent(uv_fs_event_t* handle, const char* filename,
   // unreasonable, right? Still, we should revisit this before v1.0.
   if (status) {
     SetErrno(uv_last_error(uv_default_loop()));
-    eventStr = String::Empty();
+    eventStr = String::Empty(node_isolate);
   }
   else if (events & UV_RENAME) {
     eventStr = String::New("rename");
@@ -150,9 +151,10 @@ void FSEventWrap::OnEvent(uv_fs_event_t* handle, const char* filename,
   }
 
   Local<Value> argv[3] = {
-    Integer::New(status),
+    Integer::New(status, node_isolate),
     eventStr,
-    filename ? (Local<Value>)String::New(filename) : Local<Value>::New(v8::Null())
+    filename ? static_cast<Local<Value> >(String::New(filename))
+             : Local<Value>::New(node_isolate, v8::Null(node_isolate))
   };
 
   if (onchange_sym.IsEmpty()) {
@@ -164,17 +166,19 @@ void FSEventWrap::OnEvent(uv_fs_event_t* handle, const char* filename,
 
 
 Handle<Value> FSEventWrap::Close(const Arguments& args) {
-  HandleScope scope;
+  HandleScope scope(node_isolate);
 
   // Unwrap manually here. The UNWRAP() macro asserts that wrap != NULL.
   // That usually indicates an error but not here: double closes are possible
   // and legal, HandleWrap::Close() deals with them the same way.
   assert(!args.Holder().IsEmpty());
   assert(args.Holder()->InternalFieldCount() > 0);
-  void* ptr = args.Holder()->GetPointerFromInternalField(0);
+  void* ptr = args.Holder()->GetAlignedPointerFromInternalField(0);
   FSEventWrap* wrap = static_cast<FSEventWrap*>(ptr);
 
-  if (wrap == NULL || wrap->initialized_ == false) return Undefined();
+  if (wrap == NULL || wrap->initialized_ == false) {
+    return Undefined(node_isolate);
+  }
   wrap->initialized_ = false;
 
   return HandleWrap::Close(args);

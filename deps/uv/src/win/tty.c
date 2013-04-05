@@ -22,7 +22,12 @@
 #include <assert.h>
 #include <io.h>
 #include <string.h>
-#include <stdint.h>
+
+#if defined(_MSC_VER) && _MSC_VER < 1600
+# include "uv-private/stdint-msvc2008.h"
+#else
+# include <stdint.h>
+#endif
 
 #include "uv.h"
 #include "internal.h"
@@ -92,7 +97,6 @@ void uv_console_init() {
 
 int uv_tty_init(uv_loop_t* loop, uv_tty_t* tty, uv_file fd, int readable) {
   HANDLE handle = INVALID_HANDLE_VALUE;
-  DWORD original_console_mode = 0;
   CONSOLE_SCREEN_BUFFER_INFO screen_buffer_info;
 
   handle = (HANDLE) _get_osfhandle(fd);
@@ -101,14 +105,7 @@ int uv_tty_init(uv_loop_t* loop, uv_tty_t* tty, uv_file fd, int readable) {
     return -1;
   }
 
-  if (readable) {
-     /* Try to obtain the original console mode fromt he input handle. */
-    if (!GetConsoleMode(handle, &original_console_mode)) {
-      uv__set_sys_error(loop, GetLastError());
-      return -1;
-    }
-
-  } else {
+  if (!readable) {
     /* Obtain the screen buffer info with the output handle. */
     if (!GetConsoleScreenBufferInfo(handle, &screen_buffer_info)) {
       uv__set_sys_error(loop, GetLastError());
@@ -139,7 +136,6 @@ int uv_tty_init(uv_loop_t* loop, uv_tty_t* tty, uv_file fd, int readable) {
 
   if (readable) {
     /* Initialize TTY input specific fields. */
-    tty->original_console_mode = original_console_mode;
     tty->flags |= UV_HANDLE_TTY_READABLE | UV_HANDLE_READABLE;
     tty->read_line_handle = NULL;
     tty->read_line_buffer = uv_null_buf_;
@@ -170,7 +166,7 @@ int uv_tty_init(uv_loop_t* loop, uv_tty_t* tty, uv_file fd, int readable) {
 
 
 int uv_tty_set_mode(uv_tty_t* tty, int mode) {
-  DWORD flags = 0;
+  DWORD flags;
   unsigned char was_reading;
   uv_alloc_cb alloc_cb;
   uv_read_cb read_cb;
@@ -184,17 +180,12 @@ int uv_tty_set_mode(uv_tty_t* tty, int mode) {
     return 0;
   }
 
-  if (tty->original_console_mode & ENABLE_QUICK_EDIT_MODE) {
-    flags = ENABLE_QUICK_EDIT_MODE | ENABLE_EXTENDED_FLAGS;
-  }
-
   if (mode) {
     /* Raw input */
-    flags |= ENABLE_WINDOW_INPUT;
+    flags = ENABLE_WINDOW_INPUT;
   } else {
     /* Line-buffered mode. */
-    flags |= ENABLE_ECHO_INPUT | ENABLE_INSERT_MODE | ENABLE_LINE_INPUT |
-        ENABLE_EXTENDED_FLAGS | ENABLE_PROCESSED_INPUT;
+    flags = ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT;
   }
 
   if (!SetConsoleMode(tty->handle, flags)) {
@@ -817,7 +808,7 @@ int uv_tty_read_start(uv_tty_t* handle, uv_alloc_cb alloc_cb,
   if (handle->last_key_len > 0) {
     SET_REQ_SUCCESS(&handle->read_req);
     uv_insert_pending_req(handle->loop, (uv_req_t*) &handle->read_req);
-    return -1;
+    return 0;
   }
 
   uv_tty_queue_read(loop, handle);
@@ -981,7 +972,7 @@ static int uv_tty_move_caret(uv_tty_t* handle, int x, unsigned char x_relative,
 
 static int uv_tty_reset(uv_tty_t* handle, DWORD* error) {
   const COORD origin = {0, 0};
-  const WORD char_attrs = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_RED;
+  const WORD char_attrs = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE;
   CONSOLE_SCREEN_BUFFER_INFO info;
   DWORD count, written;
 
@@ -1181,6 +1172,7 @@ static int uv_tty_set_style(uv_tty_t* handle, DWORD* error) {
     } else if (arg ==  49) {
       /* Default background color */
       bg_color = 0;
+      bg_bright = 0;
 
     } else if (arg >= 90 && arg <= 97) {
       /* Set bold foreground color */
@@ -1859,7 +1851,7 @@ void uv_process_tty_connect_req(uv_loop_t* loop, uv_tty_t* handle,
 }
 
 
-void uv_tty_reset_mode() {
+void uv_tty_reset_mode(void) {
   /* Not necessary to do anything. */
   ;
 }

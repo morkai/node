@@ -18,20 +18,27 @@
 # FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
 # IN THE SOFTWARE.
 
+OBJC ?= $(CC)
+
 E=
 CSTDFLAG=--std=c89 -pedantic -Wall -Wextra -Wno-unused-parameter
 CFLAGS += -g
-CPPFLAGS += -Isrc -Isrc/unix/ev
-LINKFLAGS=-lm
+CPPFLAGS += -I$(SRCDIR)/src
+LDFLAGS=-lm
 
 CPPFLAGS += -D_LARGEFILE_SOURCE
 CPPFLAGS += -D_FILE_OFFSET_BITS=64
+
+RUNNER_SRC=test/runner-unix.c
+RUNNER_CFLAGS=$(CFLAGS) -I$(SRCDIR)/test
+RUNNER_LDFLAGS=-L"$(CURDIR)" -luv -Xlinker -rpath -Xlinker "$(CURDIR)"
 
 OBJS += src/unix/async.o
 OBJS += src/unix/core.o
 OBJS += src/unix/dl.o
 OBJS += src/unix/error.o
 OBJS += src/unix/fs.o
+OBJS += src/unix/getaddrinfo.o
 OBJS += src/unix/loop.o
 OBJS += src/unix/loop-watcher.o
 OBJS += src/unix/pipe.o
@@ -41,135 +48,121 @@ OBJS += src/unix/signal.o
 OBJS += src/unix/stream.o
 OBJS += src/unix/tcp.o
 OBJS += src/unix/thread.o
+OBJS += src/unix/threadpool.o
 OBJS += src/unix/timer.o
 OBJS += src/unix/tty.o
 OBJS += src/unix/udp.o
+OBJS += src/fs-poll.o
+OBJS += src/uv-common.o
+OBJS += src/inet.o
+OBJS += src/version.o
 
-ifeq (SunOS,$(uname_S))
-EV_CONFIG=config_sunos.h
-EIO_CONFIG=config_sunos.h
+ifeq (sunos,$(PLATFORM))
 CPPFLAGS += -D__EXTENSIONS__ -D_XOPEN_SOURCE=500
-LINKFLAGS+=-lsocket -lnsl -lkstat
+LDFLAGS+=-lkstat -lnsl -lsendfile -lsocket
+# Library dependencies are not transitive.
+RUNNER_LDFLAGS += $(LDFLAGS)
 OBJS += src/unix/sunos.o
 endif
 
-ifeq (AIX,$(uname_S))
-EV_CONFIG=config_aix.h
-EIO_CONFIG=config_aix.h
-CPPFLAGS += -Isrc/ares/config_aix -D_ALL_SOURCE -D_XOPEN_SOURCE=500
-LINKFLAGS+= -lperfstat
+ifeq (aix,$(PLATFORM))
+CPPFLAGS += -D_ALL_SOURCE -D_XOPEN_SOURCE=500
+LDFLAGS+= -lperfstat
 OBJS += src/unix/aix.o
 endif
 
-ifeq (Darwin,$(uname_S))
-EV_CONFIG=config_darwin.h
-EIO_CONFIG=config_darwin.h
+ifeq (darwin,$(PLATFORM))
 CPPFLAGS += -D_DARWIN_USE_64_BIT_INODE=1
-LINKFLAGS+=-framework CoreServices
+LDFLAGS += -framework Foundation \
+           -framework CoreServices \
+           -framework ApplicationServices \
+           -dynamiclib -install_name "@rpath/libuv.dylib"
+SOEXT = dylib
 OBJS += src/unix/darwin.o
 OBJS += src/unix/kqueue.o
 OBJS += src/unix/fsevents.o
+OBJS += src/unix/proctitle.o
+OBJS += src/unix/darwin-proctitle.o
 endif
 
-ifeq (Linux,$(uname_S))
-EV_CONFIG=config_linux.h
-EIO_CONFIG=config_linux.h
+ifeq (linux,$(PLATFORM))
 CSTDFLAG += -D_GNU_SOURCE
-LINKFLAGS+=-ldl -lrt
-OBJS += src/unix/linux/linux-core.o \
-        src/unix/linux/inotify.o    \
-        src/unix/linux/syscalls.o
+LDFLAGS+=-ldl -lrt
+RUNNER_CFLAGS += -D_GNU_SOURCE
+OBJS += src/unix/linux-core.o \
+        src/unix/linux-inotify.o \
+        src/unix/linux-syscalls.o \
+        src/unix/proctitle.o
 endif
 
-ifeq (FreeBSD,$(uname_S))
-EV_CONFIG=config_freebsd.h
-EIO_CONFIG=config_freebsd.h
-LINKFLAGS+=-lkvm
+ifeq (freebsd,$(PLATFORM))
+LDFLAGS+=-lkvm
 OBJS += src/unix/freebsd.o
 OBJS += src/unix/kqueue.o
 endif
 
-ifeq (DragonFly,$(uname_S))
-EV_CONFIG=config_freebsd.h
-EIO_CONFIG=config_freebsd.h
-LINKFLAGS+=
+ifeq (dragonfly,$(PLATFORM))
+LDFLAGS+=-lkvm
 OBJS += src/unix/freebsd.o
 OBJS += src/unix/kqueue.o
 endif
 
-ifeq (NetBSD,$(uname_S))
-EV_CONFIG=config_netbsd.h
-EIO_CONFIG=config_netbsd.h
-LINKFLAGS+=-lkvm
+ifeq (netbsd,$(PLATFORM))
+LDFLAGS+=-lkvm
 OBJS += src/unix/netbsd.o
 OBJS += src/unix/kqueue.o
 endif
 
-ifeq (OpenBSD,$(uname_S))
-EV_CONFIG=config_openbsd.h
-EIO_CONFIG=config_openbsd.h
-LINKFLAGS+=-lkvm
+ifeq (openbsd,$(PLATFORM))
+LDFLAGS+=-lkvm
 OBJS += src/unix/openbsd.o
 OBJS += src/unix/kqueue.o
 endif
 
-ifneq (,$(findstring CYGWIN,$(uname_S)))
-EV_CONFIG=config_cygwin.h
-EIO_CONFIG=config_cygwin.h
+ifneq (,$(findstring cygwin,$(PLATFORM)))
 # We drop the --std=c89, it hides CLOCK_MONOTONIC on cygwin
 CSTDFLAG = -D_GNU_SOURCE
-LINKFLAGS+=
+LDFLAGS+=
 OBJS += src/unix/cygwin.o
 endif
 
-# Need _GNU_SOURCE for strdup?
-RUNNER_CFLAGS=$(CFLAGS) -D_GNU_SOURCE
-RUNNER_LINKFLAGS=$(LINKFLAGS)
-
-ifeq (SunOS,$(uname_S))
-RUNNER_LINKFLAGS += -pthreads
+ifeq (sunos,$(PLATFORM))
+RUNNER_LDFLAGS += -pthreads
 else
-RUNNER_LINKFLAGS += -pthread
+RUNNER_LDFLAGS += -pthread
 endif
 
-RUNNER_LIBS=
-RUNNER_SRC=test/runner-unix.c
+libuv.a: $(OBJS)
+	$(AR) rcs $@ $^
 
-uv.a: $(OBJS) src/fs-poll.o src/inet.o src/uv-common.o src/unix/ev/ev.o src/unix/uv-eio.o src/unix/eio/eio.o
-	$(AR) rcs uv.a $^
+libuv.$(SOEXT):	override CFLAGS += -fPIC
+libuv.$(SOEXT):	$(OBJS:%.o=%.pic.o)
+	$(CC) -shared -o $@ $^ $(LDFLAGS)
 
-src/%.o: src/%.c include/uv.h include/uv-private/uv-unix.h
+include/uv-private/uv-unix.h: \
+	include/uv-private/uv-bsd.h \
+	include/uv-private/uv-darwin.h \
+	include/uv-private/uv-linux.h \
+	include/uv-private/uv-sunos.h
+
+src/unix/internal.h: src/unix/linux-syscalls.h src/uv-common.h
+src/uv-common.h: src/queue.h
+
+src/.buildstamp src/unix/.buildstamp test/.buildstamp:
+	mkdir -p $(@D)
+	touch $@
+
+src/unix/%.o src/unix/%.pic.o: src/unix/%.c include/uv.h include/uv-private/uv-unix.h src/unix/internal.h src/unix/.buildstamp
 	$(CC) $(CSTDFLAG) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
-src/unix/%.o: src/unix/%.c include/uv.h include/uv-private/uv-unix.h src/unix/internal.h
+src/%.o src/%.pic.o: src/%.c include/uv.h include/uv-private/uv-unix.h src/.buildstamp
 	$(CC) $(CSTDFLAG) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
-src/unix/ev/ev.o: src/unix/ev/ev.c
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c src/unix/ev/ev.c -o src/unix/ev/ev.o -DEV_CONFIG_H=\"$(EV_CONFIG)\"
-
-
-EIO_CPPFLAGS += $(CPPFLAGS)
-EIO_CPPFLAGS += -DEIO_CONFIG_H=\"$(EIO_CONFIG)\"
-EIO_CPPFLAGS += -DEIO_STACKSIZE=262144
-EIO_CPPFLAGS += -D_GNU_SOURCE
-
-src/unix/eio/eio.o: src/unix/eio/eio.c
-	$(CC) $(EIO_CPPFLAGS) $(CFLAGS) -c src/unix/eio/eio.c -o src/unix/eio/eio.o
-
-src/unix/uv-eio.o: src/unix/uv-eio.c
-	$(CC) $(CPPFLAGS) -Isrc/unix/eio/ $(CSTDFLAG) $(CFLAGS) -c src/unix/uv-eio.c -o src/unix/uv-eio.o
-
+test/%.o: test/%.c include/uv.h test/.buildstamp
+	$(CC) $(CSTDFLAG) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 clean-platform:
-	-rm -f src/unix/*.o
-	-rm -f src/unix/ev/*.o
-	-rm -f src/unix/eio/*.o
-	-rm -f src/unix/linux/*.o
-	-rm -rf test/run-tests.dSYM run-benchmarks.dSYM
+	$(RM) test/run-{tests,benchmarks}.dSYM $(OBJS) $(OBJS:%.o=%.pic.o)
 
-distclean-platform:
-	-rm -f src/unix/*.o
-	-rm -f src/unix/ev/*.o
-	-rm -f src/unix/eio/*.o
-	-rm -f src/unix/linux/*.o
-	-rm -rf test/run-tests.dSYM run-benchmarks.dSYM
+%.pic.o %.o:  %.m
+	$(OBJC) $(CPPFLAGS) $(CFLAGS) -c $^ -o $@

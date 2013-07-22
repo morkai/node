@@ -155,7 +155,7 @@ static void CopyObjectToObjectElements(FixedArrayBase* from_base,
                                        uint32_t to_start,
                                        int raw_copy_size) {
   ASSERT(to_base->map() != HEAP->fixed_cow_array_map());
-  AssertNoAllocation no_allocation;
+  DisallowHeapAllocation no_allocation;
   int copy_size = raw_copy_size;
   if (raw_copy_size < 0) {
     ASSERT(raw_copy_size == ElementsAccessor::kCopyToEnd ||
@@ -183,7 +183,7 @@ static void CopyObjectToObjectElements(FixedArrayBase* from_base,
   Address from_address = from->address() + FixedArray::kHeaderSize;
   CopyWords(reinterpret_cast<Object**>(to_address) + to_start,
             reinterpret_cast<Object**>(from_address) + from_start,
-            copy_size);
+            static_cast<size_t>(copy_size));
   if (IsFastObjectElementsKind(from_kind) &&
       IsFastObjectElementsKind(to_kind)) {
     Heap* heap = from->GetHeap();
@@ -204,7 +204,7 @@ static void CopyDictionaryToObjectElements(FixedArrayBase* from_base,
                                            uint32_t to_start,
                                            int raw_copy_size) {
   SeededNumberDictionary* from = SeededNumberDictionary::cast(from_base);
-  AssertNoAllocation no_allocation;
+  DisallowHeapAllocation no_allocation;
   int copy_size = raw_copy_size;
   Heap* heap = from->GetHeap();
   if (raw_copy_size < 0) {
@@ -339,7 +339,7 @@ static void CopyDoubleToDoubleElements(FixedArrayBase* from_base,
   int words_per_double = (kDoubleSize / kPointerSize);
   CopyWords(reinterpret_cast<Object**>(to_address),
             reinterpret_cast<Object**>(from_address),
-            words_per_double * copy_size);
+            static_cast<size_t>(words_per_double * copy_size));
 }
 
 
@@ -840,7 +840,7 @@ class ElementsAccessorBase : public ElementsAccessor {
 
     // Fill in the content
     {
-      AssertNoAllocation no_gc;
+      DisallowHeapAllocation no_gc;
       WriteBarrierMode mode = result->GetWriteBarrierMode(no_gc);
       for (int i = 0; i < len0; i++) {
         Object* e = to->get(i);
@@ -2044,7 +2044,7 @@ MUST_USE_RESULT MaybeObject* ArrayConstructInitializeElements(
     }
     case FAST_HOLEY_ELEMENTS:
     case FAST_ELEMENTS: {
-      AssertNoAllocation no_gc;
+      DisallowHeapAllocation no_gc;
       WriteBarrierMode mode = elms->GetWriteBarrierMode(no_gc);
       FixedArray* object_elms = FixedArray::cast(elms);
       for (int index = 0; index < number_of_elements; index++) {

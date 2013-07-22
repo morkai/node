@@ -27,7 +27,7 @@
 
 #include "v8.h"
 
-#if defined(V8_TARGET_ARCH_ARM)
+#if V8_TARGET_ARCH_ARM
 
 #include "constants-arm.h"
 
@@ -51,7 +51,7 @@ double Instruction::DoubleImmedVmov() const {
 
   uint64_t imm = high16 << 48;
   double d;
-  memcpy(&d, &imm, 8);
+  OS::MemCopy(&d, &imm, 8);
   return d;
 }
 

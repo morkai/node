@@ -74,9 +74,12 @@ namespace internal {
 class LogMessageBuilder;
 class Profiler;
 class Semaphore;
+struct TickSample;
 class Ticker;
 class Isolate;
 class PositionsRecorder;
+class CpuProfiler;
+class CompilationInfo;
 
 #undef LOG
 #define LOG(isolate, Call)                          \
@@ -161,14 +164,11 @@ class Logger {
 #undef DECLARE_ENUM
 
   // Acquires resources for logging if the right flags are set.
-  bool SetUp();
+  bool SetUp(Isolate* isolate);
 
   // Sets the current code event handler.
   void SetCodeEventHandler(uint32_t options,
                            JitCodeEventHandler event_handler);
-
-  void EnsureTickerStarted();
-  void EnsureTickerStopped();
 
   Sampler* sampler();
 
@@ -236,10 +236,12 @@ class Logger {
   void CodeCreateEvent(LogEventsAndTags tag,
                        Code* code,
                        SharedFunctionInfo* shared,
+                       CompilationInfo* info,
                        Name* name);
   void CodeCreateEvent(LogEventsAndTags tag,
                        Code* code,
                        SharedFunctionInfo* shared,
+                       CompilationInfo* info,
                        Name* source, int line);
   void CodeCreateEvent(LogEventsAndTags tag, Code* code, int args_count);
   void CodeMovingGCEvent();
@@ -291,10 +293,12 @@ class Logger {
   // ==== Events logged by --log-timer-events. ====
   enum StartEnd { START, END };
 
+  void CodeDeoptEvent(Code* code);
+
   void TimerEvent(StartEnd se, const char* name);
 
-  static void EnterExternal();
-  static void LeaveExternal();
+  static void EnterExternal(Isolate* isolate);
+  static void LeaveExternal(Isolate* isolate);
 
   class TimerEventScope {
    public:
@@ -326,7 +330,7 @@ class Logger {
   void RegExpCompileEvent(Handle<JSRegExp> regexp, bool in_cache);
 
   // Log an event reported from generated code
-  void LogRuntime(Isolate* isolate, Vector<const char> format, JSArray* args);
+  void LogRuntime(Vector<const char> format, JSArray* args);
 
   bool is_logging() {
     return logging_nesting_ > 0;
@@ -411,6 +415,21 @@ class Logger {
   // Used for logging stubs found in the snapshot.
   void LogCodeObject(Object* code_object);
 
+  // Helper method. It resets name_buffer_ and add tag name into it.
+  void InitNameBuffer(LogEventsAndTags tag);
+
+  // Helper method. It push recorded buffer into different handlers.
+  void LogRecordedBuffer(Code*, SharedFunctionInfo*);
+
+  // Helper method. It dumps name into name_buffer_.
+  void AppendName(Name* name);
+
+  // Appends standard code header.
+  void AppendCodeCreateHeader(LogMessageBuilder*, LogEventsAndTags, Code*);
+
+  // Appends symbol for the name.
+  void AppendSymbolName(LogMessageBuilder*, Symbol*);
+
   // Emits general information about generated code.
   void LogCodeInfo();
 
@@ -447,9 +466,6 @@ class Logger {
   void UncheckedIntEvent(const char* name, int value);
   void UncheckedIntPtrTEvent(const char* name, intptr_t value);
 
-  // Returns whether profiler's sampler is active.
-  bool IsProfilerSamplerActive();
-
   Isolate* isolate_;
 
   // The sampler used by the profiler and the sliding state window.
@@ -470,8 +486,7 @@ class Logger {
   friend class LogMessageBuilder;
   friend class TimeLog;
   friend class Profiler;
-  friend class StackTracer;
-  friend class VMState;
+  template <StateTag Tag> friend class VMState;
 
   friend class LoggerTestHelper;
 
@@ -508,46 +523,6 @@ class Logger {
   friend class CpuProfiler;
 };
 
-
-// Process wide registry of samplers.
-class SamplerRegistry : public AllStatic {
- public:
-  enum State {
-    HAS_NO_SAMPLERS,
-    HAS_SAMPLERS,
-    HAS_CPU_PROFILING_SAMPLERS
-  };
-
-  static void SetUp();
-
-  typedef void (*VisitSampler)(Sampler*, void*);
-
-  static State GetState();
-
-  // Iterates over all active samplers keeping the internal lock held.
-  // Returns whether there are any active samplers.
-  static bool IterateActiveSamplers(VisitSampler func, void* param);
-
-  // Adds/Removes an active sampler.
-  static void AddActiveSampler(Sampler* sampler);
-  static void RemoveActiveSampler(Sampler* sampler);
-
- private:
-  static bool ActiveSamplersExist() {
-    return active_samplers_ != NULL && !active_samplers_->is_empty();
-  }
-
-  static List<Sampler*>* active_samplers_;
-
-  DISALLOW_IMPLICIT_CONSTRUCTORS(SamplerRegistry);
-};
-
-
-// Class that extracts stack trace, used for profiling.
-class StackTracer : public AllStatic {
- public:
-  static void Trace(Isolate* isolate, TickSample* sample);
-};
 
 } }  // namespace v8::internal
 

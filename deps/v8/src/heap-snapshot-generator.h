@@ -28,6 +28,8 @@
 #ifndef V8_HEAP_SNAPSHOT_GENERATOR_H_
 #define V8_HEAP_SNAPSHOT_GENERATOR_H_
 
+#include "profile-generator-inl.h"
+
 namespace v8 {
 namespace internal {
 
@@ -157,18 +159,12 @@ class HeapSnapshotsCollection;
 // HeapSnapshotGenerator fills in a HeapSnapshot.
 class HeapSnapshot {
  public:
-  enum Type {
-    kFull = v8::HeapSnapshot::kFull
-  };
-
   HeapSnapshot(HeapSnapshotsCollection* collection,
-               Type type,
                const char* title,
                unsigned uid);
   void Delete();
 
   HeapSnapshotsCollection* collection() { return collection_; }
-  Type type() { return type_; }
   const char* title() { return title_; }
   unsigned uid() { return uid_; }
   size_t RawSnapshotSize() const;
@@ -203,7 +199,6 @@ class HeapSnapshot {
 
  private:
   HeapSnapshotsCollection* collection_;
-  Type type_;
   const char* title_;
   unsigned uid_;
   int root_index_;
@@ -305,11 +300,9 @@ class HeapSnapshotsCollection {
   void StartHeapObjectsTracking() { is_tracking_objects_ = true; }
   void StopHeapObjectsTracking() { ids_.StopHeapObjectsTracking(); }
 
-  HeapSnapshot* NewSnapshot(
-      HeapSnapshot::Type type, const char* name, unsigned uid);
+  HeapSnapshot* NewSnapshot(const char* name, unsigned uid);
   void SnapshotGenerationFinished(HeapSnapshot* snapshot);
   List<HeapSnapshot*>* snapshots() { return &snapshots_; }
-  HeapSnapshot* GetSnapshot(unsigned uid);
   void RemoveSnapshot(HeapSnapshot* snapshot);
 
   StringsStorage* names() { return &names_; }
@@ -329,14 +322,8 @@ class HeapSnapshotsCollection {
   size_t GetUsedMemorySize() const;
 
  private:
-  INLINE(static bool HeapSnapshotsMatch(void* key1, void* key2)) {
-    return key1 == key2;
-  }
-
   bool is_tracking_objects_;  // Whether tracking object moves is needed.
   List<HeapSnapshot*> snapshots_;
-  // Mapping from snapshots' uids to HeapSnapshot* pointers.
-  HashMap snapshots_uids_;
   StringsStorage names_;
   TokenEnumerator* token_enumerator_;
   // Mapping from HeapObject addresses to objects' uids.
@@ -462,7 +449,7 @@ class V8HeapExplorer : public HeapEntriesAllocator {
   const char* GetSystemEntryName(HeapObject* object);
 
   void ExtractReferences(HeapObject* obj);
-  void ExtractJSGlobalProxyReferences(JSGlobalProxy* proxy);
+  void ExtractJSGlobalProxyReferences(int entry, JSGlobalProxy* proxy);
   void ExtractJSObjectReferences(int entry, JSObject* js_obj);
   void ExtractStringReferences(int entry, String* obj);
   void ExtractContextReferences(int entry, Context* context);
@@ -470,12 +457,15 @@ class V8HeapExplorer : public HeapEntriesAllocator {
   void ExtractSharedFunctionInfoReferences(int entry,
                                            SharedFunctionInfo* shared);
   void ExtractScriptReferences(int entry, Script* script);
+  void ExtractAccessorPairReferences(int entry, AccessorPair* accessors);
   void ExtractCodeCacheReferences(int entry, CodeCache* code_cache);
   void ExtractCodeReferences(int entry, Code* code);
-  void ExtractJSGlobalPropertyCellReferences(int entry,
-                                             JSGlobalPropertyCell* cell);
+  void ExtractCellReferences(int entry, Cell* cell);
+  void ExtractPropertyCellReferences(int entry, PropertyCell* cell);
   void ExtractClosureReferences(JSObject* js_obj, int entry);
   void ExtractPropertyReferences(JSObject* js_obj, int entry);
+  bool ExtractAccessorPairProperty(JSObject* js_obj, int entry,
+                                   Object* key, Object* callback_obj);
   void ExtractElementReferences(JSObject* js_obj, int entry);
   void ExtractInternalReferences(JSObject* js_obj, int entry);
   bool IsEssentialObject(Object* object);
@@ -537,6 +527,7 @@ class V8HeapExplorer : public HeapEntriesAllocator {
   SnapshotFillerInterface* filler_;
   HeapObjectsSet objects_tags_;
   HeapObjectsSet strong_gc_subroot_names_;
+  HeapObjectsSet user_roots_;
   v8::HeapProfiler::ObjectNameResolver* global_object_name_resolver_;
 
   static HeapObject* const kGcRootsObject;
@@ -663,7 +654,6 @@ class HeapSnapshotJSONSerializer {
         v8::internal::kZeroHashSeed);
   }
 
-  HeapSnapshot* CreateFakeSnapshot();
   int GetStringId(const char* s);
   int entry_index(HeapEntry* e) { return e->index() * kNodeFieldsCount; }
   void SerializeEdge(HeapGraphEdge* edge, bool first_edge);
@@ -695,3 +685,4 @@ class HeapSnapshotJSONSerializer {
 } }  // namespace v8::internal
 
 #endif  // V8_HEAP_SNAPSHOT_GENERATOR_H_
+

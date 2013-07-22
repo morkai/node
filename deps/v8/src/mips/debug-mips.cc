@@ -29,7 +29,7 @@
 
 #include "v8.h"
 
-#if defined(V8_TARGET_ARCH_MIPS)
+#if V8_TARGET_ARCH_MIPS
 
 #include "codegen.h"
 #include "debug.h"
@@ -233,6 +233,15 @@ void Debug::GenerateKeyedStoreICDebugBreak(MacroAssembler* masm) {
   //  -- a2     : receiver
   //  -- ra     : return address
   Generate_DebugBreakCallHelper(masm, a0.bit() | a1.bit() | a2.bit(), 0);
+}
+
+
+void Debug::GenerateCompareNilICDebugBreak(MacroAssembler* masm) {
+  // Register state for CompareNil IC
+  // ----------- S t a t e -------------
+  //  -- a0    : value
+  // -----------------------------------
+  Generate_DebugBreakCallHelper(masm, a0.bit(), 0);
 }
 
 

@@ -25,7 +25,7 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-// Flags: --harmony-collections --expose-gc
+// Flags: --harmony-collections --expose-gc --allow-natives-syntax
 
 
 // Test valid getter and setter calls on Sets.
@@ -254,6 +254,27 @@ assertTrue(WeakMap.prototype.has instanceof Function)
 assertTrue(WeakMap.prototype.delete instanceof Function)
 
 
+// Test class of the Set, Map and WeakMap instance and prototype.
+assertEquals("Set", %_ClassOf(new Set))
+assertEquals("Object", %_ClassOf(Set.prototype))
+assertEquals("Map", %_ClassOf(new Map))
+assertEquals("Object", %_ClassOf(Map.prototype))
+assertEquals("WeakMap", %_ClassOf(new WeakMap))
+assertEquals("Object", %_ClassOf(WeakMap.prototype))
+
+
+// Test constructor property of the Set, Map and WeakMap prototype.
+function TestConstructor(C) {
+  assertFalse(C === Object.prototype.constructor);
+  assertSame(C, C.prototype.constructor);
+  assertSame(C, C().__proto__.constructor);
+  assertSame(C, (new C).__proto__.constructor);
+}
+TestConstructor(Set);
+TestConstructor(Map);
+TestConstructor(WeakMap);
+
+
 // Regression test for WeakMap prototype.
 assertTrue(WeakMap.prototype.constructor === WeakMap)
 assertTrue(Object.getPrototypeOf(WeakMap.prototype) === Object.prototype)
@@ -356,17 +377,39 @@ for (var i = 9; i >= 0; i--) {
   assertEquals(i, m.size);
 }
 
-// Test clear
-var a = new Set();
-s.add(42);
-assertTrue(s.has(42));
-s.clear();
-assertFalse(s.has(42));
-assertEquals(0, s.size);
 
-var m = new Map();
-m.set(42, true);
-assertTrue(m.has(42));
-m.clear();
-assertFalse(m.has(42));
-assertEquals(0, m.size);
+// Test Set clear
+(function() {
+  var s = new Set();
+  s.add(42);
+  assertTrue(s.has(42));
+  assertEquals(1, s.size);
+  s.clear();
+  assertFalse(s.has(42));
+  assertEquals(0, s.size);
+})();
+
+
+// Test Map clear
+(function() {
+  var m = new Map();
+  m.set(42, true);
+  assertTrue(m.has(42));
+  assertEquals(1, m.size);
+  m.clear();
+  assertFalse(m.has(42));
+  assertEquals(0, m.size);
+})();
+
+
+// Test WeakMap clear
+(function() {
+  var k = new Object();
+  var w = new WeakMap();
+  w.set(k, 23);
+  assertTrue(w.has(k));
+  assertEquals(23, w.get(k));
+  w.clear();
+  assertFalse(w.has(k));
+  assertEquals(undefined, w.get(k));
+})();

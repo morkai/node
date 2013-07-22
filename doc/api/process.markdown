@@ -43,7 +43,7 @@ Example of listening for `uncaughtException`:
     console.log('This will not run.');
 
 Note that `uncaughtException` is a very crude mechanism for exception
-handling and may be removed in the future.
+handling.
 
 Don't use it, use [domains](domain.html) instead. If you do use it, restart
 your application after every unhandled exception!
@@ -213,7 +213,8 @@ The shell that executed node should see the exit code as 1.
 
 ## process.getgid()
 
-Note: this function is only available on POSIX platforms (i.e. not Windows)
+Note: this function is only available on POSIX platforms (i.e. not Windows,
+Android)
 
 Gets the group identity of the process. (See getgid(2).)
 This is the numerical group id, not the group name.
@@ -225,7 +226,8 @@ This is the numerical group id, not the group name.
 
 ## process.setgid(id)
 
-Note: this function is only available on POSIX platforms (i.e. not Windows)
+Note: this function is only available on POSIX platforms (i.e. not Windows,
+Android)
 
 Sets the group identity of the process. (See setgid(2).)  This accepts either
 a numerical ID or a groupname string. If a groupname is specified, this method
@@ -245,7 +247,8 @@ blocks while resolving it to a numerical ID.
 
 ## process.getuid()
 
-Note: this function is only available on POSIX platforms (i.e. not Windows)
+Note: this function is only available on POSIX platforms (i.e. not Windows,
+Android)
 
 Gets the user identity of the process. (See getuid(2).)
 This is the numerical userid, not the username.
@@ -257,7 +260,8 @@ This is the numerical userid, not the username.
 
 ## process.setuid(id)
 
-Note: this function is only available on POSIX platforms (i.e. not Windows)
+Note: this function is only available on POSIX platforms (i.e. not Windows,
+Android)
 
 Sets the user identity of the process. (See setuid(2).)  This accepts either
 a numerical ID or a username string.  If a username is specified, this method
@@ -277,7 +281,8 @@ blocks while resolving it to a numerical ID.
 
 ## process.getgroups()
 
-Note: this function is only available on POSIX platforms (i.e. not Windows)
+Note: this function is only available on POSIX platforms (i.e. not Windows,
+Android)
 
 Returns an array with the supplementary group IDs. POSIX leaves it unspecified
 if the effective group ID is included but node.js ensures it always is.
@@ -285,7 +290,8 @@ if the effective group ID is included but node.js ensures it always is.
 
 ## process.setgroups(groups)
 
-Note: this function is only available on POSIX platforms (i.e. not Windows)
+Note: this function is only available on POSIX platforms (i.e. not Windows,
+Android)
 
 Sets the supplementary group IDs. This is a privileged operation, meaning you
 need to be root or have the CAP_SETGID capability.
@@ -295,7 +301,8 @@ The list can contain group IDs, group names or both.
 
 ## process.initgroups(user, extra_group)
 
-Note: this function is only available on POSIX platforms (i.e. not Windows)
+Note: this function is only available on POSIX platforms (i.e. not Windows,
+Android)
 
 Reads /etc/group and initializes the group access list, using all groups of
 which the user is a member. This is a privileged operation, meaning you need
@@ -324,13 +331,16 @@ A property exposing version strings of node and its dependencies.
 
     console.log(process.versions);
 
-Will output:
+Will print something like:
 
-    { node: '0.4.12',
-      v8: '3.1.8.26',
-      ares: '1.7.4',
-      ev: '4.4',
-      openssl: '1.0.0e-fips' }
+    { http_parser: '1.0',
+      node: '0.10.4',
+      v8: '3.14.5.8',
+      ares: '1.9.0-DEV',
+      uv: '0.10.3',
+      zlib: '1.2.3',
+      modules: '11',
+      openssl: '1.0.1e' }
 
 ## process.config
 
@@ -444,14 +454,24 @@ This will generate:
 
 ## process.nextTick(callback)
 
-On the next loop around the event loop call this callback.
-This is *not* a simple alias to `setTimeout(fn, 0)`, it's much more
-efficient.  It typically runs before any other I/O events fire, but there
-are some exceptions.  See `process.maxTickDepth` below.
+* `callback` {Function}
 
+Once the current event loop turn runs to completion, call the callback
+function.
+
+This is *not* a simple alias to `setTimeout(fn, 0)`, it's much more
+efficient.  It runs before any additional I/O events (including
+timers) fire in subsequent ticks of the event loop.
+
+    console.log('start');
     process.nextTick(function() {
       console.log('nextTick callback');
     });
+    console.log('scheduled');
+    // Output:
+    // start
+    // scheduled
+    // nextTick callback
 
 This is important in developing APIs where you want to give the user the
 chance to assign event handlers after an object has been constructed,
@@ -503,28 +523,10 @@ This approach is much better:
       fs.stat('file', cb);
     }
 
-## process.maxTickDepth
-
-* {Number} Default = 1000
-
-Callbacks passed to `process.nextTick` will *usually* be called at the
-end of the current flow of execution, and are thus approximately as fast
-as calling a function synchronously.  Left unchecked, this would starve
-the event loop, preventing any I/O from occurring.
-
-Consider this code:
-
-    process.nextTick(function foo() {
-      process.nextTick(foo);
-    });
-
-In order to avoid the situation where Node is blocked by an infinite
-loop of recursive series of nextTick calls, it defers to allow some I/O
-to be done every so often.
-
-The `process.maxTickDepth` value is the maximum depth of
-nextTick-calling nextTick-callbacks that will be evaluated before
-allowing other forms of I/O to occur.
+Note: the nextTick queue is completely drained on each pass of the
+event loop **before** additional I/O is processed.  As a result,
+recursively setting nextTick callbacks will block any I/O from
+happening, just like a `while(true);` loop.
 
 ## process.umask([mask])
 

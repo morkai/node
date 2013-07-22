@@ -45,13 +45,6 @@ struct watcher_root {
 #define CAST(p) ((struct watcher_root*)(p))
 
 
-/* Don't look aghast, this is exactly how glibc's basename() works. */
-static char* basename_r(const char* path) {
-  char* s = strrchr(path, '/');
-  return s ? (s + 1) : (char*)path;
-}
-
-
 static int compare_watchers(const struct watcher_list* a,
                             const struct watcher_list* b) {
   if (a->wd < b->wd) return -1;
@@ -69,20 +62,27 @@ static void uv__inotify_read(uv_loop_t* loop,
 
 
 static int new_inotify_fd(void) {
+  int err;
   int fd;
 
   fd = uv__inotify_init1(UV__IN_NONBLOCK | UV__IN_CLOEXEC);
   if (fd != -1)
     return fd;
+
   if (errno != ENOSYS)
-    return -1;
+    return -errno;
 
-  if ((fd = uv__inotify_init()) == -1)
-    return -1;
+  fd = uv__inotify_init();
+  if (fd == -1)
+    return -errno;
 
-  if (uv__cloexec(fd, 1) || uv__nonblock(fd, 1)) {
-    SAVE_ERRNO(close(fd));
-    return -1;
+  err = uv__cloexec(fd, 1);
+  if (err == 0)
+    err = uv__nonblock(fd, 1);
+
+  if (err) {
+    close(fd);
+    return err;
   }
 
   return fd;
@@ -90,15 +90,16 @@ static int new_inotify_fd(void) {
 
 
 static int init_inotify(uv_loop_t* loop) {
+  int err;
+
   if (loop->inotify_fd != -1)
     return 0;
 
-  loop->inotify_fd = new_inotify_fd();
-  if (loop->inotify_fd == -1) {
-    uv__set_sys_error(loop, errno);
-    return -1;
-  }
+  err = new_inotify_fd();
+  if (err < 0)
+    return err;
 
+  loop->inotify_fd = err;
   uv__io_init(&loop->inotify_read_watcher, uv__inotify_read, loop->inotify_fd);
   uv__io_start(loop, &loop->inotify_read_watcher, UV__POLLIN);
 
@@ -156,7 +157,7 @@ static void uv__inotify_read(uv_loop_t* loop,
        * for modifications. Repurpose the filename for API compatibility.
        * I'm not convinced this is a good thing, maybe it should go.
        */
-      path = e->len ? (const char*) (e + 1) : basename_r(w->path);
+      path = e->len ? (const char*) (e + 1) : uv__basename_r(w->path);
 
       QUEUE_FOREACH(q, &w->watchers) {
         h = QUEUE_DATA(q, uv_fs_event_t, watchers);
@@ -174,9 +175,12 @@ int uv_fs_event_init(uv_loop_t* loop,
                      int flags) {
   struct watcher_list* w;
   int events;
+  int err;
   int wd;
 
-  if (init_inotify(loop)) return -1;
+  err = init_inotify(loop);
+  if (err)
+    return err;
 
   events = UV__IN_ATTRIB
          | UV__IN_CREATE
@@ -189,7 +193,7 @@ int uv_fs_event_init(uv_loop_t* loop,
 
   wd = uv__inotify_add_watch(loop->inotify_fd, path, events);
   if (wd == -1)
-    return uv__set_sys_error(loop, errno);
+    return -errno;
 
   w = find_watcher(loop, wd);
   if (w)
@@ -197,7 +201,7 @@ int uv_fs_event_init(uv_loop_t* loop,
 
   w = malloc(sizeof(*w) + strlen(path) + 1);
   if (w == NULL)
-    return uv__set_sys_error(loop, ENOMEM);
+    return -ENOMEM;
 
   w->wd = wd;
   w->path = strcpy((char*)(w + 1), path);

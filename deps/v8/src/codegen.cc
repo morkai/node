@@ -30,6 +30,7 @@
 #include "bootstrapper.h"
 #include "codegen.h"
 #include "compiler.h"
+#include "cpu-profiler.h"
 #include "debug.h"
 #include "prettyprinter.h"
 #include "rewriter.h"
@@ -58,13 +59,12 @@ Comment::~Comment() {
 #undef __
 
 
-void CodeGenerator::MakeCodePrologue(CompilationInfo* info) {
-#ifdef DEBUG
+void CodeGenerator::MakeCodePrologue(CompilationInfo* info, const char* kind) {
   bool print_source = false;
   bool print_ast = false;
   const char* ftype;
 
-  if (Isolate::Current()->bootstrapper()->IsActive()) {
+  if (info->isolate()->bootstrapper()->IsActive()) {
     print_source = FLAG_print_builtin_source;
     print_ast = FLAG_print_builtin_ast;
     ftype = "builtin";
@@ -75,17 +75,18 @@ void CodeGenerator::MakeCodePrologue(CompilationInfo* info) {
   }
 
   if (FLAG_trace_codegen || print_source || print_ast) {
-    PrintF("*** Generate code for %s function: ", ftype);
+    PrintF("[generating %s code for %s function: ", kind, ftype);
     if (info->IsStub()) {
       const char* name =
           CodeStub::MajorName(info->code_stub()->MajorKey(), true);
       PrintF("%s", name == NULL ? "<unknown>" : name);
     } else {
-      info->function()->name()->ShortPrint();
+      PrintF("%s", *info->function()->debug_name()->ToCString());
     }
-    PrintF(" ***\n");
+    PrintF("]\n");
   }
 
+#ifdef DEBUG
   if (!info->IsStub() && print_source) {
     PrintF("--- Source from AST ---\n%s\n",
            PrettyPrinter().PrintProgram(info->function()));
@@ -106,10 +107,13 @@ Handle<Code> CodeGenerator::MakeCodeEpilogue(MacroAssembler* masm,
 
   // Allocate and install the code.
   CodeDesc desc;
+  bool is_crankshafted =
+      Code::ExtractKindFromFlags(flags) == Code::OPTIMIZED_FUNCTION ||
+      info->IsStub();
   masm->GetCode(&desc);
   Handle<Code> code =
-      isolate->factory()->NewCode(desc, flags, masm->CodeObject());
-
+      isolate->factory()->NewCode(desc, flags, masm->CodeObject(),
+                                  false, is_crankshafted);
   if (!code.is_null()) {
     isolate->counters()->total_compiled_code_size()->Increment(
         code->instruction_size());
@@ -129,7 +133,7 @@ void CodeGenerator::PrintCode(Handle<Code> code, CompilationInfo* info) {
   if (print_code) {
     // Print the source code if available.
     FunctionLiteral* function = info->function();
-    if (code->kind() != Code::COMPILED_STUB) {
+    if (code->kind() == Code::OPTIMIZED_FUNCTION) {
       Handle<Script> script = info->script();
       if (!script->IsUndefined() && !script->source()->IsUndefined()) {
         PrintF("--- Raw source ---\n");
@@ -175,7 +179,7 @@ bool CodeGenerator::ShouldGenerateLog(Expression* type) {
       !isolate->cpu_profiler()->is_profiling()) {
     return false;
   }
-  Handle<String> name = Handle<String>::cast(type->AsLiteral()->handle());
+  Handle<String> name = Handle<String>::cast(type->AsLiteral()->value());
   if (FLAG_log_regexp) {
     if (name->IsOneByteEqualTo(STATIC_ASCII_VECTOR("regexp")))
       return true;

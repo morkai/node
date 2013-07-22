@@ -21,35 +21,27 @@
 
 #include "node.h"
 #include "handle_wrap.h"
-#include "pipe_wrap.h"
-#include "tty_wrap.h"
-#include "tcp_wrap.h"
-#include "udp_wrap.h"
+#include "node_wrap.h"
 
 #include <string.h>
 #include <stdlib.h>
 
 namespace node {
 
-using v8::Object;
-using v8::Handle;
-using v8::Local;
-using v8::Persistent;
-using v8::Value;
-using v8::HandleScope;
-using v8::FunctionTemplate;
-using v8::String;
 using v8::Array;
-using v8::Number;
 using v8::Function;
-using v8::TryCatch;
-using v8::Context;
-using v8::Arguments;
+using v8::FunctionCallbackInfo;
+using v8::FunctionTemplate;
+using v8::Handle;
+using v8::HandleScope;
 using v8::Integer;
-using v8::Exception;
-using v8::ThrowException;
+using v8::Local;
+using v8::Number;
+using v8::Object;
+using v8::String;
+using v8::Value;
 
-static Persistent<String> onexit_sym;
+static Cached<String> onexit_sym;
 
 class ProcessWrap : public HandleWrap {
  public:
@@ -74,21 +66,21 @@ class ProcessWrap : public HandleWrap {
   }
 
  private:
-  static Handle<Value> New(const Arguments& args) {
+  static void New(const FunctionCallbackInfo<Value>& args) {
     // This constructor should not be exposed to public javascript.
     // Therefore we assert that we are not trying to call this as a
     // normal function.
     assert(args.IsConstructCall());
-
     HandleScope scope(node_isolate);
-    ProcessWrap *wrap = new ProcessWrap(args.This());
-    assert(wrap);
-
-    return scope.Close(args.This());
+    new ProcessWrap(args.This());
   }
 
-  ProcessWrap(Handle<Object> object) : HandleWrap(object, NULL) { }
-  ~ProcessWrap() { }
+  ProcessWrap(Handle<Object> object)
+      : HandleWrap(object, reinterpret_cast<uv_handle_t*>(&process_)) {
+  }
+
+  ~ProcessWrap() {
+  }
 
   static void ParseStdioOptions(Local<Object> js_options,
                                 uv_process_options_t* options) {
@@ -112,21 +104,8 @@ class ProcessWrap : public HandleWrap {
             PipeWrap::Unwrap(stdio
                 ->Get(String::NewSymbol("handle")).As<Object>())->UVHandle());
       } else if (type->Equals(String::NewSymbol("wrap"))) {
-        uv_stream_t* stream = NULL;
-        Local<Value> wrapType = stdio->Get(String::NewSymbol("wrapType"));
-        if (wrapType->Equals(String::NewSymbol("pipe"))) {
-          stream = reinterpret_cast<uv_stream_t*>(PipeWrap::Unwrap(stdio
-              ->Get(String::NewSymbol("handle")).As<Object>())->UVHandle());
-        } else if (wrapType->Equals(String::NewSymbol("tty"))) {
-          stream = reinterpret_cast<uv_stream_t*>(TTYWrap::Unwrap(stdio
-              ->Get(String::NewSymbol("handle")).As<Object>())->UVHandle());
-        } else if (wrapType->Equals(String::NewSymbol("tcp"))) {
-          stream = reinterpret_cast<uv_stream_t*>(TCPWrap::Unwrap(stdio
-              ->Get(String::NewSymbol("handle")).As<Object>())->UVHandle());
-        } else if (wrapType->Equals(String::NewSymbol("udp"))) {
-          stream = reinterpret_cast<uv_stream_t*>(UDPWrap::Unwrap(stdio
-              ->Get(String::NewSymbol("handle")).As<Object>())->UVHandle());
-        }
+        uv_stream_t* stream = HandleToStream(
+            stdio->Get(String::NewSymbol("handle")).As<Object>());
         assert(stream != NULL);
 
         options->stdio[i].flags = UV_INHERIT_STREAM;
@@ -141,7 +120,7 @@ class ProcessWrap : public HandleWrap {
     }
   }
 
-  static Handle<Value> Spawn(const Arguments& args) {
+  static void Spawn(const FunctionCallbackInfo<Value>& args) {
     HandleScope scope(node_isolate);
 
     UNWRAP(ProcessWrap)
@@ -158,14 +137,12 @@ class ProcessWrap : public HandleWrap {
     if (uid_v->IsInt32()) {
       int32_t uid = uid_v->Int32Value();
       if (uid & ~((uv_uid_t) ~0)) {
-        return ThrowException(Exception::RangeError(
-            String::New("options.uid is out of range")));
+        return ThrowRangeError("options.uid is out of range");
       }
       options.flags |= UV_PROCESS_SETUID;
       options.uid = (uv_uid_t) uid;
     } else if (!uid_v->IsUndefined() && !uid_v->IsNull()) {
-      return ThrowException(Exception::TypeError(
-          String::New("options.uid should be a number")));
+      return ThrowTypeError("options.uid should be a number");
     }
 
     // options.gid
@@ -173,14 +150,12 @@ class ProcessWrap : public HandleWrap {
     if (gid_v->IsInt32()) {
       int32_t gid = gid_v->Int32Value();
       if (gid & ~((uv_gid_t) ~0)) {
-        return ThrowException(Exception::RangeError(
-           String::New("options.gid is out of range")));
+        return ThrowRangeError("options.gid is out of range");
       }
       options.flags |= UV_PROCESS_SETGID;
       options.gid = (uv_gid_t) gid;
     } else if (!gid_v->IsUndefined() && !gid_v->IsNull()) {
-      return ThrowException(Exception::TypeError(
-          String::New("options.gid should be a number")));
+      return ThrowTypeError("options.gid should be a number");
     }
 
     // TODO is this possible to do without mallocing ?
@@ -191,7 +166,7 @@ class ProcessWrap : public HandleWrap {
     if (file.length() > 0) {
       options.file = *file;
     } else {
-      return ThrowException(Exception::TypeError(String::New("Bad argument")));
+      return ThrowTypeError("Bad argument");
     }
 
     // options.args
@@ -242,16 +217,12 @@ class ProcessWrap : public HandleWrap {
       options.flags |= UV_PROCESS_DETACHED;
     }
 
-    int r = uv_spawn(uv_default_loop(), &wrap->process_, options);
+    int err = uv_spawn(uv_default_loop(), &wrap->process_, options);
 
-    if (r) {
-      SetErrno(uv_last_error(uv_default_loop()));
-    }
-    else {
-      wrap->SetHandle((uv_handle_t*)&wrap->process_);
+    if (err == 0) {
       assert(wrap->process_.data == wrap);
-      wrap->object_->Set(String::New("pid"),
-                         Integer::New(wrap->process_.pid, node_isolate));
+      wrap->object()->Set(String::New("pid"),
+                          Integer::New(wrap->process_.pid, node_isolate));
     }
 
     if (options.args) {
@@ -266,21 +237,16 @@ class ProcessWrap : public HandleWrap {
 
     delete[] options.stdio;
 
-    return scope.Close(Integer::New(r, node_isolate));
+    args.GetReturnValue().Set(err);
   }
 
-  static Handle<Value> Kill(const Arguments& args) {
+  static void Kill(const FunctionCallbackInfo<Value>& args) {
     HandleScope scope(node_isolate);
-
     UNWRAP(ProcessWrap)
 
     int signal = args[0]->Int32Value();
-
-    int r = uv_process_kill(&wrap->process_, signal);
-
-    if (r) SetErrno(uv_last_error(uv_default_loop()));
-
-    return scope.Close(Integer::New(r, node_isolate));
+    int err = uv_process_kill(&wrap->process_, signal);
+    args.GetReturnValue().Set(err);
   }
 
   static void OnExit(uv_process_t* handle, int exit_status, int term_signal) {
@@ -290,20 +256,16 @@ class ProcessWrap : public HandleWrap {
     assert(wrap);
     assert(&wrap->process_ == handle);
 
-    Local<Value> argv[2] = {
+    Local<Value> argv[] = {
       Integer::New(exit_status, node_isolate),
       String::New(signo_string(term_signal))
     };
 
-    if (exit_status == -1) {
-      SetErrno(uv_last_error(uv_default_loop()));
-    }
-
     if (onexit_sym.IsEmpty()) {
-      onexit_sym = NODE_PSYMBOL("onexit");
+      onexit_sym = String::New("onexit");
     }
 
-    MakeCallback(wrap->object_, onexit_sym, ARRAY_SIZE(argv), argv);
+    MakeCallback(wrap->object(), onexit_sym, ARRAY_SIZE(argv), argv);
   }
 
   uv_process_t process_;

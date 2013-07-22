@@ -43,19 +43,8 @@ namespace v8 {
 namespace internal {
 
 
-static ReturnAddressLocationResolver return_address_location_resolver = NULL;
-
-
-// Resolves pc_address through the resolution address function if one is set.
-static inline Address* ResolveReturnAddressLocation(Address* pc_address) {
-  if (return_address_location_resolver == NULL) {
-    return pc_address;
-  } else {
-    return reinterpret_cast<Address*>(
-        return_address_location_resolver(
-            reinterpret_cast<uintptr_t>(pc_address)));
-  }
-}
+ReturnAddressLocationResolver
+    StackFrame::return_address_location_resolver_ = NULL;
 
 
 // Iterator that supports traversing the stack handlers of a
@@ -88,39 +77,29 @@ class StackHandlerIterator BASE_EMBEDDED {
 
 
 #define INITIALIZE_SINGLETON(type, field) field##_(this),
-StackFrameIterator::StackFrameIterator(Isolate* isolate)
+StackFrameIteratorBase::StackFrameIteratorBase(Isolate* isolate,
+                                               bool can_access_heap_objects)
     : isolate_(isolate),
       STACK_FRAME_TYPE_LIST(INITIALIZE_SINGLETON)
       frame_(NULL), handler_(NULL),
-      thread_(isolate_->thread_local_top()),
-      fp_(NULL), sp_(NULL), advance_(&StackFrameIterator::AdvanceWithHandler) {
-  Reset();
+      can_access_heap_objects_(can_access_heap_objects) {
 }
-StackFrameIterator::StackFrameIterator(Isolate* isolate, ThreadLocalTop* t)
-    : isolate_(isolate),
-      STACK_FRAME_TYPE_LIST(INITIALIZE_SINGLETON)
-      frame_(NULL), handler_(NULL), thread_(t),
-      fp_(NULL), sp_(NULL), advance_(&StackFrameIterator::AdvanceWithHandler) {
-  Reset();
-}
-StackFrameIterator::StackFrameIterator(Isolate* isolate,
-                                       bool use_top, Address fp, Address sp)
-    : isolate_(isolate),
-      STACK_FRAME_TYPE_LIST(INITIALIZE_SINGLETON)
-      frame_(NULL), handler_(NULL),
-      thread_(use_top ? isolate_->thread_local_top() : NULL),
-      fp_(use_top ? NULL : fp), sp_(sp),
-      advance_(use_top ? &StackFrameIterator::AdvanceWithHandler :
-               &StackFrameIterator::AdvanceWithoutHandler) {
-  if (use_top || fp != NULL) {
-    Reset();
-  }
-}
-
 #undef INITIALIZE_SINGLETON
 
 
-void StackFrameIterator::AdvanceWithHandler() {
+StackFrameIterator::StackFrameIterator(Isolate* isolate)
+    : StackFrameIteratorBase(isolate, true) {
+  Reset(isolate->thread_local_top());
+}
+
+
+StackFrameIterator::StackFrameIterator(Isolate* isolate, ThreadLocalTop* t)
+    : StackFrameIteratorBase(isolate, true) {
+  Reset(t);
+}
+
+
+void StackFrameIterator::Advance() {
   ASSERT(!done());
   // Compute the state of the calling frame before restoring
   // callee-saved registers and unwinding handlers. This allows the
@@ -143,37 +122,17 @@ void StackFrameIterator::AdvanceWithHandler() {
 }
 
 
-void StackFrameIterator::AdvanceWithoutHandler() {
-  // A simpler version of Advance which doesn't care about handler.
-  ASSERT(!done());
+void StackFrameIterator::Reset(ThreadLocalTop* top) {
   StackFrame::State state;
-  StackFrame::Type type = frame_->GetCallerState(&state);
-  frame_ = SingletonFor(type, &state);
-}
-
-
-void StackFrameIterator::Reset() {
-  StackFrame::State state;
-  StackFrame::Type type;
-  if (thread_ != NULL) {
-    type = ExitFrame::GetStateForFramePointer(
-        Isolate::c_entry_fp(thread_), &state);
-    handler_ = StackHandler::FromAddress(
-        Isolate::handler(thread_));
-  } else {
-    ASSERT(fp_ != NULL);
-    state.fp = fp_;
-    state.sp = sp_;
-    state.pc_address = ResolveReturnAddressLocation(
-        reinterpret_cast<Address*>(StandardFrame::ComputePCAddress(fp_)));
-    type = StackFrame::ComputeType(isolate(), &state);
-  }
+  StackFrame::Type type = ExitFrame::GetStateForFramePointer(
+      Isolate::c_entry_fp(top), &state);
+  handler_ = StackHandler::FromAddress(Isolate::handler(top));
   if (SingletonFor(type) == NULL) return;
   frame_ = SingletonFor(type, &state);
 }
 
 
-StackFrame* StackFrameIterator::SingletonFor(StackFrame::Type type,
+StackFrame* StackFrameIteratorBase::SingletonFor(StackFrame::Type type,
                                              StackFrame::State* state) {
   if (type == StackFrame::NONE) return NULL;
   StackFrame* result = SingletonFor(type);
@@ -183,7 +142,7 @@ StackFrame* StackFrameIterator::SingletonFor(StackFrame::Type type,
 }
 
 
-StackFrame* StackFrameIterator::SingletonFor(StackFrame::Type type) {
+StackFrame* StackFrameIteratorBase::SingletonFor(StackFrame::Type type) {
 #define FRAME_TYPE_CASE(type, field) \
   case StackFrame::type: result = &field##_; break;
 
@@ -196,6 +155,33 @@ StackFrame* StackFrameIterator::SingletonFor(StackFrame::Type type) {
   return result;
 
 #undef FRAME_TYPE_CASE
+}
+
+
+// -------------------------------------------------------------------------
+
+
+JavaScriptFrameIterator::JavaScriptFrameIterator(
+    Isolate* isolate, StackFrame::Id id)
+    : iterator_(isolate) {
+  while (!done()) {
+    Advance();
+    if (frame()->id() == id) return;
+  }
+}
+
+
+void JavaScriptFrameIterator::Advance() {
+  do {
+    iterator_.Advance();
+  } while (!iterator_.done() && !iterator_.frame()->is_java_script());
+}
+
+
+void JavaScriptFrameIterator::AdvanceToArgumentsFrame() {
+  if (!frame()->has_adapted_arguments()) return;
+  iterator_.Advance();
+  ASSERT(iterator_.frame()->is_arguments_adaptor());
 }
 
 
@@ -228,85 +214,80 @@ bool StackTraceFrameIterator::IsValidFrame() {
 // -------------------------------------------------------------------------
 
 
-bool SafeStackFrameIterator::ExitFrameValidator::IsValidFP(Address fp) {
-  if (!validator_.IsValid(fp)) return false;
-  Address sp = ExitFrame::ComputeStackPointer(fp);
-  if (!validator_.IsValid(sp)) return false;
-  StackFrame::State state;
-  ExitFrame::FillState(fp, sp, &state);
-  if (!validator_.IsValid(reinterpret_cast<Address>(state.pc_address))) {
-    return false;
-  }
-  return *state.pc_address != NULL;
-}
-
-
-SafeStackFrameIterator::ActiveCountMaintainer::ActiveCountMaintainer(
-    Isolate* isolate)
-    : isolate_(isolate) {
-  isolate_->set_safe_stack_iterator_counter(
-      isolate_->safe_stack_iterator_counter() + 1);
-}
-
-
-SafeStackFrameIterator::ActiveCountMaintainer::~ActiveCountMaintainer() {
-  isolate_->set_safe_stack_iterator_counter(
-      isolate_->safe_stack_iterator_counter() - 1);
-}
-
-
 SafeStackFrameIterator::SafeStackFrameIterator(
     Isolate* isolate,
-    Address fp, Address sp, Address low_bound, Address high_bound) :
-    maintainer_(isolate),
-    stack_validator_(low_bound, high_bound),
-    is_valid_top_(IsValidTop(isolate, low_bound, high_bound)),
-    is_valid_fp_(IsWithinBounds(low_bound, high_bound, fp)),
-    is_working_iterator_(is_valid_top_ || is_valid_fp_),
-    iteration_done_(!is_working_iterator_),
-    iterator_(isolate, is_valid_top_, is_valid_fp_ ? fp : NULL, sp) {
-}
-
-bool SafeStackFrameIterator::is_active(Isolate* isolate) {
-  return isolate->safe_stack_iterator_counter() > 0;
-}
-
-
-bool SafeStackFrameIterator::IsValidTop(Isolate* isolate,
-                                        Address low_bound, Address high_bound) {
+    Address fp, Address sp, Address js_entry_sp)
+    : StackFrameIteratorBase(isolate, false),
+      low_bound_(sp),
+      high_bound_(js_entry_sp),
+      top_frame_type_(StackFrame::NONE) {
+  StackFrame::State state;
+  StackFrame::Type type;
   ThreadLocalTop* top = isolate->thread_local_top();
+  if (IsValidTop(top)) {
+    type = ExitFrame::GetStateForFramePointer(Isolate::c_entry_fp(top), &state);
+    top_frame_type_ = type;
+  } else if (IsValidStackAddress(fp)) {
+    ASSERT(fp != NULL);
+    state.fp = fp;
+    state.sp = sp;
+    state.pc_address = StackFrame::ResolveReturnAddressLocation(
+        reinterpret_cast<Address*>(StandardFrame::ComputePCAddress(fp)));
+    // StackFrame::ComputeType will read both kContextOffset and kMarkerOffset,
+    // we check only that kMarkerOffset is within the stack bounds and do
+    // compile time check that kContextOffset slot is pushed on the stack before
+    // kMarkerOffset.
+    STATIC_ASSERT(StandardFrameConstants::kMarkerOffset <
+                  StandardFrameConstants::kContextOffset);
+    Address frame_marker = fp + StandardFrameConstants::kMarkerOffset;
+    if (IsValidStackAddress(frame_marker)) {
+      type = StackFrame::ComputeType(this, &state);
+      top_frame_type_ = type;
+    } else {
+      // Mark the frame as JAVA_SCRIPT if we cannot determine its type.
+      // The frame anyways will be skipped.
+      type = StackFrame::JAVA_SCRIPT;
+      // Top frame is incomplete so we cannot reliably determine its type.
+      top_frame_type_ = StackFrame::NONE;
+    }
+  } else {
+    return;
+  }
+  if (SingletonFor(type) == NULL) return;
+  frame_ = SingletonFor(type, &state);
+
+  if (!done()) Advance();
+}
+
+
+bool SafeStackFrameIterator::IsValidTop(ThreadLocalTop* top) const {
   Address fp = Isolate::c_entry_fp(top);
-  ExitFrameValidator validator(low_bound, high_bound);
-  if (!validator.IsValidFP(fp)) return false;
+  if (!IsValidExitFrame(fp)) return false;
+  // There should be at least one JS_ENTRY stack handler.
   return Isolate::handler(top) != NULL;
 }
 
 
-void SafeStackFrameIterator::Advance() {
-  ASSERT(is_working_iterator_);
+void SafeStackFrameIterator::AdvanceOneFrame() {
   ASSERT(!done());
-  StackFrame* last_frame = iterator_.frame();
+  StackFrame* last_frame = frame_;
   Address last_sp = last_frame->sp(), last_fp = last_frame->fp();
-  // Before advancing to the next stack frame, perform pointer validity tests
-  iteration_done_ = !IsValidFrame(last_frame) ||
-      !CanIterateHandles(last_frame, iterator_.handler()) ||
-      !IsValidCaller(last_frame);
-  if (iteration_done_) return;
+  // Before advancing to the next stack frame, perform pointer validity tests.
+  if (!IsValidFrame(last_frame) || !IsValidCaller(last_frame)) {
+    frame_ = NULL;
+    return;
+  }
 
-  iterator_.Advance();
-  if (iterator_.done()) return;
-  // Check that we have actually moved to the previous frame in the stack
-  StackFrame* prev_frame = iterator_.frame();
-  iteration_done_ = prev_frame->sp() < last_sp || prev_frame->fp() < last_fp;
-}
+  // Advance to the previous frame.
+  StackFrame::State state;
+  StackFrame::Type type = frame_->GetCallerState(&state);
+  frame_ = SingletonFor(type, &state);
+  if (frame_ == NULL) return;
 
-
-bool SafeStackFrameIterator::CanIterateHandles(StackFrame* frame,
-                                               StackHandler* handler) {
-  // If StackIterator iterates over StackHandles, verify that
-  // StackHandlerIterator can be instantiated (see StackHandlerIterator
-  // constructor.)
-  return !is_valid_top_ || (frame->sp() <= handler->address());
+  // Check that we have actually moved to the previous frame in the stack.
+  if (frame_->sp() < last_sp || frame_->fp() < last_fp) {
+    frame_ = NULL;
+  }
 }
 
 
@@ -323,8 +304,7 @@ bool SafeStackFrameIterator::IsValidCaller(StackFrame* frame) {
     // sure that caller FP address is valid.
     Address caller_fp = Memory::Address_at(
         frame->fp() + EntryFrameConstants::kCallerFPOffset);
-    ExitFrameValidator validator(stack_validator_);
-    if (!validator.IsValidFP(caller_fp)) return false;
+    if (!IsValidExitFrame(caller_fp)) return false;
   } else if (frame->is_arguments_adaptor()) {
     // See ArgumentsAdaptorFrame::GetCallerStackPointer. It assumes that
     // the number of arguments is stored on stack as Smi. We need to check
@@ -337,36 +317,33 @@ bool SafeStackFrameIterator::IsValidCaller(StackFrame* frame) {
   }
   frame->ComputeCallerState(&state);
   return IsValidStackAddress(state.sp) && IsValidStackAddress(state.fp) &&
-      iterator_.SingletonFor(frame->GetCallerState(&state)) != NULL;
+      SingletonFor(frame->GetCallerState(&state)) != NULL;
 }
 
 
-void SafeStackFrameIterator::Reset() {
-  if (is_working_iterator_) {
-    iterator_.Reset();
-    iteration_done_ = false;
+bool SafeStackFrameIterator::IsValidExitFrame(Address fp) const {
+  if (!IsValidStackAddress(fp)) return false;
+  Address sp = ExitFrame::ComputeStackPointer(fp);
+  if (!IsValidStackAddress(sp)) return false;
+  StackFrame::State state;
+  ExitFrame::FillState(fp, sp, &state);
+  if (!IsValidStackAddress(reinterpret_cast<Address>(state.pc_address))) {
+    return false;
+  }
+  return *state.pc_address != NULL;
+}
+
+
+void SafeStackFrameIterator::Advance() {
+  while (true) {
+    AdvanceOneFrame();
+    if (done()) return;
+    if (frame_->is_java_script()) return;
   }
 }
 
 
 // -------------------------------------------------------------------------
-
-
-SafeStackTraceFrameIterator::SafeStackTraceFrameIterator(
-    Isolate* isolate,
-    Address fp, Address sp, Address low_bound, Address high_bound) :
-    SafeJavaScriptFrameIterator(isolate, fp, sp, low_bound, high_bound) {
-  if (!done() && !frame()->is_java_script()) Advance();
-}
-
-
-void SafeStackTraceFrameIterator::Advance() {
-  while (true) {
-    SafeJavaScriptFrameIterator::Advance();
-    if (done()) return;
-    if (frame()->is_java_script()) return;
-  }
-}
 
 
 Code* StackFrame::GetSafepointData(Isolate* isolate,
@@ -420,12 +397,13 @@ void StackFrame::IteratePc(ObjectVisitor* v,
 
 void StackFrame::SetReturnAddressLocationResolver(
     ReturnAddressLocationResolver resolver) {
-  ASSERT(return_address_location_resolver == NULL);
-  return_address_location_resolver = resolver;
+  ASSERT(return_address_location_resolver_ == NULL);
+  return_address_location_resolver_ = resolver;
 }
 
 
-StackFrame::Type StackFrame::ComputeType(Isolate* isolate, State* state) {
+StackFrame::Type StackFrame::ComputeType(const StackFrameIteratorBase* iterator,
+                                         State* state) {
   ASSERT(state->fp != NULL);
   if (StandardFrame::IsArgumentsAdaptorFrame(state->fp)) {
     return ARGUMENTS_ADAPTOR;
@@ -440,8 +418,9 @@ StackFrame::Type StackFrame::ComputeType(Isolate* isolate, State* state) {
     // frames as normal JavaScript frames to avoid having to look
     // into the heap to determine the state. This is safe as long
     // as nobody tries to GC...
-    if (SafeStackFrameIterator::is_active(isolate)) return JAVA_SCRIPT;
-    Code::Kind kind = GetContainingCode(isolate, *(state->pc_address))->kind();
+    if (!iterator->can_access_heap_objects_) return JAVA_SCRIPT;
+    Code::Kind kind = GetContainingCode(iterator->isolate(),
+                                        *(state->pc_address))->kind();
     ASSERT(kind == Code::FUNCTION || kind == Code::OPTIMIZED_FUNCTION);
     return (kind == Code::OPTIMIZED_FUNCTION) ? OPTIMIZED : JAVA_SCRIPT;
   }
@@ -449,15 +428,21 @@ StackFrame::Type StackFrame::ComputeType(Isolate* isolate, State* state) {
 }
 
 
+#ifdef DEBUG
+bool StackFrame::can_access_heap_objects() const {
+  return iterator_->can_access_heap_objects_;
+}
+#endif
+
 
 StackFrame::Type StackFrame::GetCallerState(State* state) const {
   ComputeCallerState(state);
-  return ComputeType(isolate(), state);
+  return ComputeType(iterator_, state);
 }
 
 
 Address StackFrame::UnpaddedFP() const {
-#if defined(V8_TARGET_ARCH_IA32)
+#if V8_TARGET_ARCH_IA32
   if (!is_optimized()) return fp();
   int32_t alignment_state = Memory::int32_at(
     fp() + JavaScriptFrameConstants::kDynamicAlignmentStateOffset);
@@ -545,6 +530,11 @@ StackFrame::Type ExitFrame::GetStateForFramePointer(Address fp, State* state) {
 }
 
 
+Address ExitFrame::ComputeStackPointer(Address fp) {
+  return Memory::Address_at(fp + ExitFrameConstants::kSPOffset);
+}
+
+
 void ExitFrame::FillState(Address fp, Address sp, State* state) {
   state->sp = sp;
   state->fp = fp;
@@ -607,7 +597,7 @@ bool StandardFrame::IsExpressionInsideHandler(int n) const {
 void StandardFrame::IterateCompiledFrame(ObjectVisitor* v) const {
   // Make sure that we're not doing "safe" stack frame iteration. We cannot
   // possibly find pointers in optimized frames in that state.
-  ASSERT(!SafeStackFrameIterator::is_active(isolate()));
+  ASSERT(can_access_heap_objects());
 
   // Compute the safepoint information.
   unsigned stack_slots = 0;
@@ -734,12 +724,12 @@ int JavaScriptFrame::GetArgumentsLength() const {
 
 Code* JavaScriptFrame::unchecked_code() const {
   JSFunction* function = JSFunction::cast(this->function());
-  return function->unchecked_code();
+  return function->code();
 }
 
 
 int JavaScriptFrame::GetNumberOfIncomingArguments() const {
-  ASSERT(!SafeStackFrameIterator::is_active(isolate()) &&
+  ASSERT(can_access_heap_objects() &&
          isolate()->heap()->gc_state() == Heap::NOT_IN_GC);
 
   JSFunction* function = JSFunction::cast(this->function());
@@ -777,7 +767,7 @@ void JavaScriptFrame::PrintTop(Isolate* isolate,
                                bool print_line_number) {
   // constructor calls
   HandleScope scope(isolate);
-  AssertNoAllocation no_allocation;
+  DisallowHeapAllocation no_allocation;
   JavaScriptFrameIterator it(isolate);
   while (!it.done()) {
     if (it.frame()->is_java_script()) {
@@ -836,6 +826,72 @@ void JavaScriptFrame::PrintTop(Isolate* isolate,
       break;
     }
     it.Advance();
+  }
+}
+
+
+void JavaScriptFrame::SaveOperandStack(FixedArray* store,
+                                       int* stack_handler_index) const {
+  int operands_count = store->length();
+  ASSERT_LE(operands_count, ComputeOperandsCount());
+
+  // Visit the stack in LIFO order, saving operands and stack handlers into the
+  // array.  The saved stack handlers store a link to the next stack handler,
+  // which will allow RestoreOperandStack to rewind the handlers.
+  StackHandlerIterator it(this, top_handler());
+  int i = operands_count - 1;
+  *stack_handler_index = -1;
+  for (; !it.done(); it.Advance()) {
+    StackHandler* handler = it.handler();
+    // Save operands pushed after the handler was pushed.
+    for (; GetOperandSlot(i) < handler->address(); i--) {
+      store->set(i, GetOperand(i));
+    }
+    ASSERT_GE(i + 1, StackHandlerConstants::kSlotCount);
+    ASSERT_EQ(handler->address(), GetOperandSlot(i));
+    int next_stack_handler_index = i + 1 - StackHandlerConstants::kSlotCount;
+    handler->Unwind(isolate(), store, next_stack_handler_index,
+                    *stack_handler_index);
+    *stack_handler_index = next_stack_handler_index;
+    i -= StackHandlerConstants::kSlotCount;
+  }
+
+  // Save any remaining operands.
+  for (; i >= 0; i--) {
+    store->set(i, GetOperand(i));
+  }
+}
+
+
+void JavaScriptFrame::RestoreOperandStack(FixedArray* store,
+                                          int stack_handler_index) {
+  int operands_count = store->length();
+  ASSERT_LE(operands_count, ComputeOperandsCount());
+  int i = 0;
+  while (i <= stack_handler_index) {
+    if (i < stack_handler_index) {
+      // An operand.
+      ASSERT_EQ(GetOperand(i), isolate()->heap()->the_hole_value());
+      Memory::Object_at(GetOperandSlot(i)) = store->get(i);
+      i++;
+    } else {
+      // A stack handler.
+      ASSERT_EQ(i, stack_handler_index);
+      // The FixedArray store grows up.  The stack grows down.  So the operand
+      // slot for i actually points to the bottom of the top word in the
+      // handler.  The base of the StackHandler* is the address of the bottom
+      // word, which will be the last slot that is in the handler.
+      int handler_slot_index = i + StackHandlerConstants::kSlotCount - 1;
+      StackHandler *handler =
+          StackHandler::FromAddress(GetOperandSlot(handler_slot_index));
+      stack_handler_index = handler->Rewind(isolate(), store, i, fp());
+      i += StackHandlerConstants::kSlotCount;
+    }
+  }
+
+  for (; i < operands_count; i++) {
+    ASSERT_EQ(GetOperand(i), isolate()->heap()->the_hole_value());
+    Memory::Object_at(GetOperandSlot(i)) = store->get(i);
   }
 }
 
@@ -1311,18 +1367,19 @@ Address StubFailureTrampolineFrame::GetCallerStackPointer() const {
 
 
 Code* StubFailureTrampolineFrame::unchecked_code() const {
-  int i = 0;
-  for (; i <= StubFailureTrampolineStub::kMaxExtraExpressionStackCount; ++i) {
-    Code* trampoline;
-    StubFailureTrampolineStub(i).FindCodeInCache(&trampoline, isolate());
-    ASSERT(trampoline != NULL);
-    Address current_pc = pc();
-    Address code_start = trampoline->instruction_start();
-    Address code_end = code_start + trampoline->instruction_size();
-    if (code_start <= current_pc && current_pc < code_end) {
-      return trampoline;
-    }
+  Code* trampoline;
+  StubFailureTrampolineStub(NOT_JS_FUNCTION_STUB_MODE).
+      FindCodeInCache(&trampoline, isolate());
+  if (trampoline->contains(pc())) {
+    return trampoline;
   }
+
+  StubFailureTrampolineStub(JS_FUNCTION_STUB_MODE).
+      FindCodeInCache(&trampoline, isolate());
+  if (trampoline->contains(pc())) {
+    return trampoline;
+  }
+
   UNREACHABLE();
   return NULL;
 }
@@ -1432,6 +1489,60 @@ InnerPointerToCodeCache::InnerPointerToCodeCacheEntry*
     entry->inner_pointer = inner_pointer;
   }
   return entry;
+}
+
+
+// -------------------------------------------------------------------------
+
+
+void StackHandler::Unwind(Isolate* isolate,
+                          FixedArray* array,
+                          int offset,
+                          int previous_handler_offset) const {
+  STATIC_ASSERT(StackHandlerConstants::kSlotCount == 5);
+  ASSERT_LE(0, offset);
+  ASSERT_GE(array->length(), offset + 5);
+  // Unwinding a stack handler into an array chains it in the opposite
+  // direction, re-using the "next" slot as a "previous" link, so that stack
+  // handlers can be later re-wound in the correct order.  Decode the "state"
+  // slot into "index" and "kind" and store them separately, using the fp slot.
+  array->set(offset, Smi::FromInt(previous_handler_offset));        // next
+  array->set(offset + 1, *code_address());                          // code
+  array->set(offset + 2, Smi::FromInt(static_cast<int>(index())));  // state
+  array->set(offset + 3, *context_address());                       // context
+  array->set(offset + 4, Smi::FromInt(static_cast<int>(kind())));   // fp
+
+  *isolate->handler_address() = next()->address();
+}
+
+
+int StackHandler::Rewind(Isolate* isolate,
+                         FixedArray* array,
+                         int offset,
+                         Address fp) {
+  STATIC_ASSERT(StackHandlerConstants::kSlotCount == 5);
+  ASSERT_LE(0, offset);
+  ASSERT_GE(array->length(), offset + 5);
+  Smi* prev_handler_offset = Smi::cast(array->get(offset));
+  Code* code = Code::cast(array->get(offset + 1));
+  Smi* smi_index = Smi::cast(array->get(offset + 2));
+  Object* context = array->get(offset + 3);
+  Smi* smi_kind = Smi::cast(array->get(offset + 4));
+
+  unsigned state = KindField::encode(static_cast<Kind>(smi_kind->value())) |
+      IndexField::encode(static_cast<unsigned>(smi_index->value()));
+
+  Memory::Address_at(address() + StackHandlerConstants::kNextOffset) =
+      *isolate->handler_address();
+  Memory::Object_at(address() + StackHandlerConstants::kCodeOffset) = code;
+  Memory::uintptr_at(address() + StackHandlerConstants::kStateOffset) = state;
+  Memory::Object_at(address() + StackHandlerConstants::kContextOffset) =
+      context;
+  Memory::Address_at(address() + StackHandlerConstants::kFPOffset) = fp;
+
+  *isolate->handler_address() = address();
+
+  return prev_handler_offset->value();
 }
 
 

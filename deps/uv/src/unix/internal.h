@@ -26,6 +26,7 @@
 
 #include <assert.h>
 #include <stdlib.h> /* abort */
+#include <string.h> /* strrchr */
 
 #if defined(__STRICT_ANSI__)
 # define inline __inline
@@ -46,7 +47,7 @@
 #endif
 
 #define STATIC_ASSERT(expr)                                                   \
-  void uv__static_assert(int static_assert_failed[0 - !(expr)])
+  void uv__static_assert(int static_assert_failed[1 - 2 * !(expr)])
 
 #define ACCESS_ONCE(type, var)                                                \
   (*(volatile type*) &(var))
@@ -98,17 +99,19 @@
 
 /* handle flags */
 enum {
-  UV_CLOSING          = 0x01,   /* uv_close() called but not finished. */
-  UV_CLOSED           = 0x02,   /* close(2) finished. */
-  UV_STREAM_READING   = 0x04,   /* uv_read_start() called. */
-  UV_STREAM_SHUTTING  = 0x08,   /* uv_shutdown() called but not complete. */
-  UV_STREAM_SHUT      = 0x10,   /* Write side closed. */
-  UV_STREAM_READABLE  = 0x20,   /* The stream is readable */
-  UV_STREAM_WRITABLE  = 0x40,   /* The stream is writable */
-  UV_STREAM_BLOCKING  = 0x80,   /* Synchronous writes. */
-  UV_TCP_NODELAY      = 0x100,  /* Disable Nagle. */
-  UV_TCP_KEEPALIVE    = 0x200,  /* Turn on keep-alive. */
-  UV_TCP_SINGLE_ACCEPT = 0x400  /* Only accept() when idle. */
+  UV_CLOSING              = 0x01,   /* uv_close() called but not finished. */
+  UV_CLOSED               = 0x02,   /* close(2) finished. */
+  UV_STREAM_READING       = 0x04,   /* uv_read_start() called. */
+  UV_STREAM_SHUTTING      = 0x08,   /* uv_shutdown() called but not complete. */
+  UV_STREAM_SHUT          = 0x10,   /* Write side closed. */
+  UV_STREAM_READABLE      = 0x20,   /* The stream is readable */
+  UV_STREAM_WRITABLE      = 0x40,   /* The stream is writable */
+  UV_STREAM_BLOCKING      = 0x80,   /* Synchronous writes. */
+  UV_STREAM_READ_PARTIAL  = 0x100,  /* read(2) read less than requested. */
+  UV_STREAM_READ_EOF      = 0x200,  /* read(2) read EOF. */
+  UV_TCP_NODELAY          = 0x400,  /* Disable Nagle. */
+  UV_TCP_KEEPALIVE        = 0x800,  /* Turn on keep-alive. */
+  UV_TCP_SINGLE_ACCEPT    = 0x1000  /* Only accept() when idle. */
 };
 
 /* core */
@@ -138,10 +141,6 @@ void uv__loop_delete(uv_loop_t* loop);
 void uv__run_idle(uv_loop_t* loop);
 void uv__run_check(uv_loop_t* loop);
 void uv__run_prepare(uv_loop_t* loop);
-
-/* error */
-uv_err_code uv_translate_sys_error(int sys_errno);
-void uv_fatal_error(const int errorno, const char* syscall);
 
 /* stream */
 void uv__stream_init(uv_loop_t* loop, uv_stream_t* stream,
@@ -255,5 +254,24 @@ __attribute__((unused))
 static void uv__update_time(uv_loop_t* loop) {
   loop->time = uv__hrtime() / 1000000;
 }
+
+__attribute__((unused))
+static char* uv__basename_r(const char* path) {
+  char* s;
+
+  s = strrchr(path, '/');
+  if (s == NULL)
+    return (char*) path;
+
+  return s + 1;
+}
+
+
+#ifdef HAVE_DTRACE
+#include "uv-dtrace.h"
+#else
+#define UV_TICK_START(arg0, arg1)
+#define UV_TICK_STOP(arg0, arg1)
+#endif
 
 #endif /* UV_UNIX_INTERNAL_H_ */

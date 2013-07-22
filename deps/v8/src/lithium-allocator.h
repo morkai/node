@@ -244,13 +244,12 @@ class UseInterval: public ZoneObject {
 // Representation of a use position.
 class UsePosition: public ZoneObject {
  public:
-  UsePosition(LifetimePosition pos, LOperand* operand);
+  UsePosition(LifetimePosition pos, LOperand* operand, LOperand* hint);
 
   LOperand* operand() const { return operand_; }
   bool HasOperand() const { return operand_ != NULL; }
 
   LOperand* hint() const { return hint_; }
-  void set_hint(LOperand* hint) { hint_ = hint; }
   bool HasHint() const;
   bool RequiresRegister() const;
   bool RegisterIsBeneficial() const;
@@ -261,9 +260,9 @@ class UsePosition: public ZoneObject {
  private:
   void set_next(UsePosition* next) { next_ = next; }
 
-  LOperand* operand_;
-  LOperand* hint_;
-  LifetimePosition pos_;
+  LOperand* const operand_;
+  LOperand* const hint_;
+  LifetimePosition const pos_;
   UsePosition* next_;
   bool requires_reg_;
   bool register_beneficial_;
@@ -329,10 +328,14 @@ class LiveRange: public ZoneObject {
     return assigned_register_ != kInvalidAssignment;
   }
   bool IsSpilled() const { return spilled_; }
-  UsePosition* FirstPosWithHint() const;
 
+  LOperand* current_hint_operand() const {
+    ASSERT(current_hint_operand_ == FirstHint());
+    return current_hint_operand_;
+  }
   LOperand* FirstHint() const {
-    UsePosition* pos = FirstPosWithHint();
+    UsePosition* pos = first_pos_;
+    while (pos != NULL && !pos->HasHint()) pos = pos->next();
     if (pos != NULL) return pos->hint();
     return NULL;
   }
@@ -367,9 +370,10 @@ class LiveRange: public ZoneObject {
   void AddUseInterval(LifetimePosition start,
                       LifetimePosition end,
                       Zone* zone);
-  UsePosition* AddUsePosition(LifetimePosition pos,
-                              LOperand* operand,
-                              Zone* zone);
+  void AddUsePosition(LifetimePosition pos,
+                      LOperand* operand,
+                      LOperand* hint,
+                      Zone* zone);
 
   // Shorten the most recently added interval by setting a new start.
   void ShortenTo(LifetimePosition start);
@@ -398,6 +402,8 @@ class LiveRange: public ZoneObject {
   // This is used as a cache, it doesn't affect correctness.
   mutable UseInterval* current_interval_;
   UsePosition* last_processed_use_;
+  // This is used as a cache, it's invalid outside of BuildLiveRanges.
+  LOperand* current_hint_operand_;
   LOperand* spill_operand_;
   int spill_start_index_;
 };
@@ -428,7 +434,7 @@ class LAllocator BASE_EMBEDDED {
   LPlatformChunk* chunk() const { return chunk_; }
   HGraph* graph() const { return graph_; }
   Isolate* isolate() const { return graph_->isolate(); }
-  Zone* zone() const { return zone_; }
+  Zone* zone() { return &zone_; }
 
   int GetVirtualRegister() {
     if (next_virtual_register_ >= LUnallocated::kMaxVirtualRegisters) {
@@ -468,7 +474,6 @@ class LAllocator BASE_EMBEDDED {
   void ConnectRanges();
   void ResolveControlFlow();
   void PopulatePointerMaps();
-  void ProcessOsrEntry();
   void AllocateRegisters();
   bool CanEagerlyResolveControlFlow(HBasicBlock* block) const;
   inline bool SafePointsAreInOrder() const;
@@ -536,10 +541,17 @@ class LAllocator BASE_EMBEDDED {
   // Spill the given life range after position pos.
   void SpillAfter(LiveRange* range, LifetimePosition pos);
 
-  // Spill the given life range after position start and up to position end.
+  // Spill the given life range after position [start] and up to position [end].
   void SpillBetween(LiveRange* range,
                     LifetimePosition start,
                     LifetimePosition end);
+
+  // Spill the given life range after position [start] and up to position [end].
+  // Range is guaranteed to be spilled at least until position [until].
+  void SpillBetweenUntil(LiveRange* range,
+                         LifetimePosition start,
+                         LifetimePosition until,
+                         LifetimePosition end);
 
   void SplitAndSpillIntersecting(LiveRange* range);
 
@@ -558,8 +570,7 @@ class LAllocator BASE_EMBEDDED {
 
   inline void SetLiveRangeAssignedRegister(LiveRange* range,
                                            int reg,
-                                           RegisterKind register_kind,
-                                           Zone* zone);
+                                           RegisterKind register_kind);
 
   // Return parallel move that should be used to connect ranges split at the
   // given position.
@@ -586,7 +597,7 @@ class LAllocator BASE_EMBEDDED {
 
   inline LGap* GapAt(int index);
 
-  Zone* zone_;
+  Zone zone_;
 
   LPlatformChunk* chunk_;
 
@@ -625,7 +636,24 @@ class LAllocator BASE_EMBEDDED {
   // Indicates success or failure during register allocation.
   bool allocation_ok_;
 
+#ifdef DEBUG
+  LifetimePosition allocation_finger_;
+#endif
+
   DISALLOW_COPY_AND_ASSIGN(LAllocator);
+};
+
+
+class LAllocatorPhase : public CompilationPhase {
+ public:
+  LAllocatorPhase(const char* name, LAllocator* allocator);
+  ~LAllocatorPhase();
+
+ private:
+  LAllocator* allocator_;
+  unsigned allocator_zone_start_allocation_size_;
+
+  DISALLOW_COPY_AND_ASSIGN(LAllocatorPhase);
 };
 
 

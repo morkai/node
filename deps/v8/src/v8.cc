@@ -37,10 +37,10 @@
 #include "heap-profiler.h"
 #include "hydrogen.h"
 #include "lithium-allocator.h"
-#include "log.h"
 #include "objects.h"
 #include "once.h"
 #include "platform.h"
+#include "sampler.h"
 #include "runtime-profiler.h"
 #include "serialize.h"
 #include "store-buffer.h"
@@ -56,6 +56,7 @@ bool V8::has_been_disposed_ = false;
 bool V8::has_fatal_error_ = false;
 bool V8::use_crankshaft_ = true;
 List<CallCompletedCallback>* V8::call_completed_callbacks_ = NULL;
+v8::ArrayBuffer::Allocator* V8::array_buffer_allocator_ = NULL;
 
 static LazyMutex entropy_mutex = LAZY_MUTEX_INITIALIZER;
 
@@ -123,6 +124,7 @@ void V8::TearDown() {
   delete call_completed_callbacks_;
   call_completed_callbacks_ = NULL;
 
+  Sampler::TearDown();
   OS::TearDown();
 }
 
@@ -269,18 +271,56 @@ void V8::InitializeOncePerProcessImpl() {
     FLAG_max_new_space_size = (1 << (kPageSizeBits - 10)) * 2;
   }
   if (FLAG_trace_hydrogen) FLAG_parallel_recompilation = false;
+
+  if (FLAG_sweeper_threads <= 0) {
+    if (FLAG_concurrent_sweeping) {
+      FLAG_sweeper_threads = SystemThreadManager::
+          NumberOfParallelSystemThreads(
+              SystemThreadManager::CONCURRENT_SWEEPING);
+    } else if (FLAG_parallel_sweeping) {
+      FLAG_sweeper_threads = SystemThreadManager::
+          NumberOfParallelSystemThreads(
+              SystemThreadManager::PARALLEL_SWEEPING);
+    }
+    if (FLAG_sweeper_threads == 0) {
+      FLAG_concurrent_sweeping = false;
+      FLAG_parallel_sweeping = false;
+    }
+  } else if (!FLAG_concurrent_sweeping && !FLAG_parallel_sweeping) {
+    FLAG_sweeper_threads = 0;
+  }
+
+  if (FLAG_parallel_marking) {
+    if (FLAG_marking_threads <= 0) {
+      FLAG_marking_threads = SystemThreadManager::
+          NumberOfParallelSystemThreads(
+              SystemThreadManager::PARALLEL_MARKING);
+    }
+    if (FLAG_marking_threads == 0) {
+      FLAG_parallel_marking = false;
+    }
+  } else {
+    FLAG_marking_threads = 0;
+  }
+
+  if (FLAG_parallel_recompilation &&
+      SystemThreadManager::NumberOfParallelSystemThreads(
+          SystemThreadManager::PARALLEL_RECOMPILATION) == 0) {
+    FLAG_parallel_recompilation = false;
+  }
+
   OS::SetUp();
+  Sampler::SetUp();
   CPU::SetUp();
   use_crankshaft_ = FLAG_crankshaft
       && !Serializer::enabled()
       && CPU::SupportsCrankshaft();
   OS::PostSetUp();
-  RuntimeProfiler::GlobalSetUp();
   ElementsAccessor::InitializeOncePerProcess();
   LOperand::SetUpCaches();
   SetUpJSCallerSavedCodeData();
-  SamplerRegistry::SetUp();
   ExternalReference::SetUp();
+  Bootstrapper::InitializeOncePerProcess();
 }
 
 void V8::InitializeOncePerProcess() {

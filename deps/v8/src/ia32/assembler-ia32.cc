@@ -36,7 +36,7 @@
 
 #include "v8.h"
 
-#if defined(V8_TARGET_ARCH_IA32)
+#if V8_TARGET_ARCH_IA32
 
 #include "disassembler.h"
 #include "macro-assembler.h"
@@ -1459,7 +1459,7 @@ void Assembler::call(Handle<Code> code,
   EnsureSpace ensure_space(this);
   ASSERT(RelocInfo::IsCodeTarget(rmode));
   EMIT(0xE8);
-  emit(reinterpret_cast<intptr_t>(code.location()), rmode, ast_id);
+  emit(code, rmode, ast_id);
 }
 
 
@@ -1513,7 +1513,7 @@ void Assembler::jmp(Handle<Code> code, RelocInfo::Mode rmode) {
   EnsureSpace ensure_space(this);
   ASSERT(RelocInfo::IsCodeTarget(rmode));
   EMIT(0xE9);
-  emit(reinterpret_cast<intptr_t>(code.location()), rmode);
+  emit(code, rmode);
 }
 
 
@@ -1568,7 +1568,7 @@ void Assembler::j(Condition cc, Handle<Code> code) {
   // 0000 1111 1000 tttn #32-bit disp
   EMIT(0x0F);
   EMIT(0x80 | cc);
-  emit(reinterpret_cast<intptr_t>(code.location()), RelocInfo::CODE_TARGET);
+  emit(code, RelocInfo::CODE_TARGET);
 }
 
 
@@ -2351,7 +2351,7 @@ void Assembler::movd(const Operand& dst, XMMRegister src) {
 
 
 void Assembler::extractps(Register dst, XMMRegister src, byte imm8) {
-  ASSERT(CpuFeatures::IsSupported(SSE4_1));
+  ASSERT(IsEnabled(SSE4_1));
   ASSERT(is_uint8(imm8));
   EnsureSpace ensure_space(this);
   EMIT(0x66);
@@ -2556,9 +2556,9 @@ void Assembler::GrowBuffer() {
   // Copy the data.
   int pc_delta = desc.buffer - buffer_;
   int rc_delta = (desc.buffer + desc.buffer_size) - (buffer_ + buffer_size_);
-  memmove(desc.buffer, buffer_, desc.instr_size);
-  memmove(rc_delta + reloc_info_writer.pos(),
-          reloc_info_writer.pos(), desc.reloc_size);
+  OS::MemMove(desc.buffer, buffer_, desc.instr_size);
+  OS::MemMove(rc_delta + reloc_info_writer.pos(),
+              reloc_info_writer.pos(), desc.reloc_size);
 
   // Switch buffers.
   if (isolate()->assembler_spare_buffer() == NULL &&

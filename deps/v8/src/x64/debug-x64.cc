@@ -27,7 +27,7 @@
 
 #include "v8.h"
 
-#if defined(V8_TARGET_ARCH_X64)
+#if V8_TARGET_ARCH_X64
 
 #include "assembler.h"
 #include "codegen.h"
@@ -230,6 +230,15 @@ void Debug::GenerateKeyedStoreICDebugBreak(MacroAssembler* masm) {
   // -----------------------------------
   Generate_DebugBreakCallHelper(
       masm, rax.bit() | rcx.bit() | rdx.bit(), 0, false);
+}
+
+
+void Debug::GenerateCompareNilICDebugBreak(MacroAssembler* masm) {
+  // Register state for CompareNil IC
+  // ----------- S t a t e -------------
+  //  -- rax    : value
+  // -----------------------------------
+  Generate_DebugBreakCallHelper(masm, rax.bit(), 0, false);
 }
 
 

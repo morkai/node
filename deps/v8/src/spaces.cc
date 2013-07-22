@@ -72,6 +72,7 @@ HeapObjectIterator::HeapObjectIterator(Page* page,
          owner == page->heap()->old_data_space() ||
          owner == page->heap()->map_space() ||
          owner == page->heap()->cell_space() ||
+         owner == page->heap()->property_cell_space() ||
          owner == page->heap()->code_space());
   Initialize(reinterpret_cast<PagedSpace*>(owner),
              page->area_start(),
@@ -467,6 +468,11 @@ MemoryChunk* MemoryChunk::Initialize(Heap* heap,
   chunk->progress_bar_ = 0;
   chunk->high_water_mark_ = static_cast<int>(area_start - base);
   chunk->parallel_sweeping_ = 0;
+  chunk->available_in_small_free_list_ = 0;
+  chunk->available_in_medium_free_list_ = 0;
+  chunk->available_in_large_free_list_ = 0;
+  chunk->available_in_huge_free_list_ = 0;
+  chunk->non_available_small_blocks_ = 0;
   chunk->ResetLiveBytes();
   Bitmap::Clear(chunk);
   chunk->initialize_scan_on_scavenge(false);
@@ -694,6 +700,15 @@ MemoryChunk* MemoryAllocator::AllocateChunk(intptr_t reserve_area_size,
                                                 owner);
   result->set_reserved_memory(&reservation);
   return result;
+}
+
+
+void Page::ResetFreeListStatistics() {
+  non_available_small_blocks_ = 0;
+  available_in_small_free_list_ = 0;
+  available_in_medium_free_list_ = 0;
+  available_in_large_free_list_ = 0;
+  available_in_huge_free_list_ = 0;
 }
 
 
@@ -1029,11 +1044,14 @@ intptr_t PagedSpace::SizeOfFirstPage() {
     case CELL_SPACE:
       size = 16 * kPointerSize * KB;
       break;
+    case PROPERTY_CELL_SPACE:
+      size = 8 * kPointerSize * KB;
+      break;
     case CODE_SPACE:
-      if (kPointerSize == 8) {
-        // On x64 we allocate code pages in a special way (from the reserved
-        // 2Byte area). That part of the code is not yet upgraded to handle
-        // small pages.
+      if (heap()->isolate()->code_range()->exists()) {
+        // When code range exists, code pages are allocated in a special way
+        // (from the reserved code range). That part of the code is not yet
+        // upgraded to handle small pages.
         size = AreaSize();
       } else {
         size = 384 * KB;
@@ -1054,6 +1072,23 @@ int PagedSpace::CountTotalPages() {
     count++;
   }
   return count;
+}
+
+
+void PagedSpace::ObtainFreeListStatistics(Page* page, SizeStats* sizes) {
+  sizes->huge_size_ = page->available_in_huge_free_list();
+  sizes->small_size_ = page->available_in_small_free_list();
+  sizes->medium_size_ = page->available_in_medium_free_list();
+  sizes->large_size_ = page->available_in_large_free_list();
+}
+
+
+void PagedSpace::ResetFreeListStatistics() {
+  PageIterator page_iterator(this);
+  while (page_iterator.has_next()) {
+    Page* page = page_iterator.next();
+    page->ResetFreeListStatistics();
+  }
 }
 
 
@@ -1755,49 +1790,20 @@ static void ClearHistograms() {
 }
 
 
-static void ClearCodeKindStatistics() {
-  Isolate* isolate = Isolate::Current();
+static void ClearCodeKindStatistics(int* code_kind_statistics) {
   for (int i = 0; i < Code::NUMBER_OF_KINDS; i++) {
-    isolate->code_kind_statistics()[i] = 0;
+    code_kind_statistics[i] = 0;
   }
 }
 
 
-static void ReportCodeKindStatistics() {
-  Isolate* isolate = Isolate::Current();
-  const char* table[Code::NUMBER_OF_KINDS] = { NULL };
-
-#define CASE(name)                            \
-  case Code::name: table[Code::name] = #name; \
-  break
-
-  for (int i = 0; i < Code::NUMBER_OF_KINDS; i++) {
-    switch (static_cast<Code::Kind>(i)) {
-      CASE(FUNCTION);
-      CASE(OPTIMIZED_FUNCTION);
-      CASE(STUB);
-      CASE(COMPILED_STUB);
-      CASE(BUILTIN);
-      CASE(LOAD_IC);
-      CASE(KEYED_LOAD_IC);
-      CASE(STORE_IC);
-      CASE(KEYED_STORE_IC);
-      CASE(CALL_IC);
-      CASE(KEYED_CALL_IC);
-      CASE(UNARY_OP_IC);
-      CASE(BINARY_OP_IC);
-      CASE(COMPARE_IC);
-      CASE(TO_BOOLEAN_IC);
-    }
-  }
-
-#undef CASE
-
+static void ReportCodeKindStatistics(int* code_kind_statistics) {
   PrintF("\n   Code kind histograms: \n");
   for (int i = 0; i < Code::NUMBER_OF_KINDS; i++) {
-    if (isolate->code_kind_statistics()[i] > 0) {
-      PrintF("     %-20s: %10d bytes\n", table[i],
-          isolate->code_kind_statistics()[i]);
+    if (code_kind_statistics[i] > 0) {
+      PrintF("     %-20s: %10d bytes\n",
+             Code::Kind2String(static_cast<Code::Kind>(i)),
+             code_kind_statistics[i]);
     }
   }
   PrintF("\n");
@@ -1805,7 +1811,7 @@ static void ReportCodeKindStatistics() {
 
 
 static int CollectHistogramInfo(HeapObject* obj) {
-  Isolate* isolate = Isolate::Current();
+  Isolate* isolate = obj->GetIsolate();
   InstanceType type = obj->map()->instance_type();
   ASSERT(0 <= type && type <= LAST_TYPE);
   ASSERT(isolate->heap_histograms()[type].name() != NULL);
@@ -2056,20 +2062,6 @@ void FreeListCategory::Reset() {
 }
 
 
-intptr_t FreeListCategory::CountFreeListItemsInList(Page* p) {
-  int sum = 0;
-  FreeListNode* n = top_;
-  while (n != NULL) {
-    if (Page::FromAddress(n->address()) == p) {
-      FreeSpace* free_space = reinterpret_cast<FreeSpace*>(n);
-      sum += free_space->Size();
-    }
-    n = n->next();
-  }
-  return sum;
-}
-
-
 intptr_t FreeListCategory::EvictFreeListItemsInList(Page* p) {
   int sum = 0;
   FreeListNode** n = &top_;
@@ -2097,13 +2089,13 @@ FreeListNode* FreeListCategory::PickNodeFromList(int *node_size) {
 
   while (node != NULL &&
          Page::FromAddress(node->address())->IsEvacuationCandidate()) {
-    available_ -= node->Size();
+    available_ -= reinterpret_cast<FreeSpace*>(node)->Size();
     node = node->next();
   }
 
   if (node != NULL) {
     set_top(node->next());
-    *node_size = node->Size();
+    *node_size = reinterpret_cast<FreeSpace*>(node)->Size();
     available_ -= *node_size;
   } else {
     set_top(NULL);
@@ -2113,6 +2105,18 @@ FreeListNode* FreeListCategory::PickNodeFromList(int *node_size) {
     set_end(NULL);
   }
 
+  return node;
+}
+
+
+FreeListNode* FreeListCategory::PickNodeFromList(int size_in_bytes,
+                                                 int *node_size) {
+  FreeListNode* node = PickNodeFromList(node_size);
+  if (node != NULL && *node_size < size_in_bytes) {
+    Free(node, *node_size);
+    *node_size = 0;
+    return NULL;
+  }
   return node;
 }
 
@@ -2170,20 +2174,28 @@ int FreeList::Free(Address start, int size_in_bytes) {
 
   FreeListNode* node = FreeListNode::FromAddress(start);
   node->set_size(heap_, size_in_bytes);
+  Page* page = Page::FromAddress(start);
 
   // Early return to drop too-small blocks on the floor.
-  if (size_in_bytes < kSmallListMin) return size_in_bytes;
+  if (size_in_bytes < kSmallListMin) {
+    page->add_non_available_small_blocks(size_in_bytes);
+    return size_in_bytes;
+  }
 
   // Insert other blocks at the head of a free list of the appropriate
   // magnitude.
   if (size_in_bytes <= kSmallListMax) {
     small_list_.Free(node, size_in_bytes);
+    page->add_available_in_small_free_list(size_in_bytes);
   } else if (size_in_bytes <= kMediumListMax) {
     medium_list_.Free(node, size_in_bytes);
+    page->add_available_in_medium_free_list(size_in_bytes);
   } else if (size_in_bytes <= kLargeListMax) {
     large_list_.Free(node, size_in_bytes);
+    page->add_available_in_large_free_list(size_in_bytes);
   } else {
     huge_list_.Free(node, size_in_bytes);
+    page->add_available_in_huge_free_list(size_in_bytes);
   }
 
   ASSERT(IsVeryLong() || available() == SumFreeLists());
@@ -2193,20 +2205,39 @@ int FreeList::Free(Address start, int size_in_bytes) {
 
 FreeListNode* FreeList::FindNodeFor(int size_in_bytes, int* node_size) {
   FreeListNode* node = NULL;
+  Page* page = NULL;
 
   if (size_in_bytes <= kSmallAllocationMax) {
     node = small_list_.PickNodeFromList(node_size);
-    if (node != NULL) return node;
+    if (node != NULL) {
+      ASSERT(size_in_bytes <= *node_size);
+      page = Page::FromAddress(node->address());
+      page->add_available_in_small_free_list(-(*node_size));
+      ASSERT(IsVeryLong() || available() == SumFreeLists());
+      return node;
+    }
   }
 
   if (size_in_bytes <= kMediumAllocationMax) {
     node = medium_list_.PickNodeFromList(node_size);
-    if (node != NULL) return node;
+    if (node != NULL) {
+      ASSERT(size_in_bytes <= *node_size);
+      page = Page::FromAddress(node->address());
+      page->add_available_in_medium_free_list(-(*node_size));
+      ASSERT(IsVeryLong() || available() == SumFreeLists());
+      return node;
+    }
   }
 
   if (size_in_bytes <= kLargeAllocationMax) {
     node = large_list_.PickNodeFromList(node_size);
-    if (node != NULL) return node;
+    if (node != NULL) {
+      ASSERT(size_in_bytes <= *node_size);
+      page = Page::FromAddress(node->address());
+      page->add_available_in_large_free_list(-(*node_size));
+      ASSERT(IsVeryLong() || available() == SumFreeLists());
+      return node;
+    }
   }
 
   int huge_list_available = huge_list_.available();
@@ -2216,7 +2247,10 @@ FreeListNode* FreeList::FindNodeFor(int size_in_bytes, int* node_size) {
     FreeListNode* cur_node = *cur;
     while (cur_node != NULL &&
            Page::FromAddress(cur_node->address())->IsEvacuationCandidate()) {
-      huge_list_available -= reinterpret_cast<FreeSpace*>(cur_node)->Size();
+      int size = reinterpret_cast<FreeSpace*>(cur_node)->Size();
+      huge_list_available -= size;
+      page = Page::FromAddress(cur_node->address());
+      page->add_available_in_huge_free_list(-size);
       cur_node = cur_node->next();
     }
 
@@ -2235,6 +2269,8 @@ FreeListNode* FreeList::FindNodeFor(int size_in_bytes, int* node_size) {
       *cur = node->next();
       *node_size = size;
       huge_list_available -= size;
+      page = Page::FromAddress(node->address());
+      page->add_available_in_huge_free_list(-size);
       break;
     }
   }
@@ -2242,10 +2278,37 @@ FreeListNode* FreeList::FindNodeFor(int size_in_bytes, int* node_size) {
   if (huge_list_.top() == NULL) {
     huge_list_.set_end(NULL);
   }
-
   huge_list_.set_available(huge_list_available);
-  ASSERT(IsVeryLong() || available() == SumFreeLists());
 
+  if (node != NULL) {
+    ASSERT(IsVeryLong() || available() == SumFreeLists());
+    return node;
+  }
+
+  if (size_in_bytes <= kSmallListMax) {
+    node = small_list_.PickNodeFromList(size_in_bytes, node_size);
+    if (node != NULL) {
+      ASSERT(size_in_bytes <= *node_size);
+      page = Page::FromAddress(node->address());
+      page->add_available_in_small_free_list(-(*node_size));
+    }
+  } else if (size_in_bytes <= kMediumListMax) {
+    node = medium_list_.PickNodeFromList(size_in_bytes, node_size);
+    if (node != NULL) {
+      ASSERT(size_in_bytes <= *node_size);
+      page = Page::FromAddress(node->address());
+      page->add_available_in_medium_free_list(-(*node_size));
+    }
+  } else if (size_in_bytes <= kLargeListMax) {
+    node = large_list_.PickNodeFromList(size_in_bytes, node_size);
+    if (node != NULL) {
+      ASSERT(size_in_bytes <= *node_size);
+      page = Page::FromAddress(node->address());
+      page->add_available_in_large_free_list(-(*node_size));
+    }
+  }
+
+  ASSERT(IsVeryLong() || available() == SumFreeLists());
   return node;
 }
 
@@ -2261,14 +2324,6 @@ HeapObject* FreeList::Allocate(int size_in_bytes) {
   // Don't free list allocate if there is linear space available.
   ASSERT(owner_->limit() - owner_->top() < size_in_bytes);
 
-  int new_node_size = 0;
-  FreeListNode* new_node = FindNodeFor(size_in_bytes, &new_node_size);
-  if (new_node == NULL) return NULL;
-
-
-  int bytes_left = new_node_size - size_in_bytes;
-  ASSERT(bytes_left >= 0);
-
   int old_linear_size = static_cast<int>(owner_->limit() - owner_->top());
   // Mark the old linear allocation area with a free space map so it can be
   // skipped when scanning the heap.  This also puts it back in the free list
@@ -2277,6 +2332,16 @@ HeapObject* FreeList::Allocate(int size_in_bytes) {
 
   owner_->heap()->incremental_marking()->OldSpaceStep(
       size_in_bytes - old_linear_size);
+
+  int new_node_size = 0;
+  FreeListNode* new_node = FindNodeFor(size_in_bytes, &new_node_size);
+  if (new_node == NULL) {
+    owner_->SetTop(NULL, NULL);
+    return NULL;
+  }
+
+  int bytes_left = new_node_size - size_in_bytes;
+  ASSERT(bytes_left >= 0);
 
 #ifdef DEBUG
   for (int i = 0; i < size_in_bytes / kPointerSize; i++) {
@@ -2322,27 +2387,17 @@ HeapObject* FreeList::Allocate(int size_in_bytes) {
 }
 
 
-void FreeList::CountFreeListItems(Page* p, SizeStats* sizes) {
-  sizes->huge_size_ = huge_list_.CountFreeListItemsInList(p);
-  if (sizes->huge_size_ < p->area_size()) {
-    sizes->small_size_ = small_list_.CountFreeListItemsInList(p);
-    sizes->medium_size_ = medium_list_.CountFreeListItemsInList(p);
-    sizes->large_size_ = large_list_.CountFreeListItemsInList(p);
-  } else {
-    sizes->small_size_ = 0;
-    sizes->medium_size_ = 0;
-    sizes->large_size_ = 0;
-  }
-}
-
-
 intptr_t FreeList::EvictFreeListItems(Page* p) {
   intptr_t sum = huge_list_.EvictFreeListItemsInList(p);
+  p->set_available_in_huge_free_list(0);
 
   if (sum < p->area_size()) {
     sum += small_list_.EvictFreeListItemsInList(p) +
         medium_list_.EvictFreeListItemsInList(p) +
         large_list_.EvictFreeListItemsInList(p);
+    p->set_available_in_small_free_list(0);
+    p->set_available_in_medium_free_list(0);
+    p->set_available_in_large_free_list(0);
   }
 
   return sum;
@@ -2630,7 +2685,7 @@ void PagedSpace::ReportCodeStatistics() {
   Isolate* isolate = Isolate::Current();
   CommentStatistic* comments_statistics =
       isolate->paged_space_comments_statistics();
-  ReportCodeKindStatistics();
+  ReportCodeKindStatistics(isolate->code_kind_statistics());
   PrintF("Code comment statistics (\"   [ comment-txt   :    size/   "
          "count  (average)\"):\n");
   for (int i = 0; i <= CommentStatistic::kMaxComments; i++) {
@@ -2648,7 +2703,7 @@ void PagedSpace::ResetCodeStatistics() {
   Isolate* isolate = Isolate::Current();
   CommentStatistic* comments_statistics =
       isolate->paged_space_comments_statistics();
-  ClearCodeKindStatistics();
+  ClearCodeKindStatistics(isolate->code_kind_statistics());
   for (int i = 0; i < CommentStatistic::kMaxComments; i++) {
     comments_statistics[i].Clear();
   }
@@ -2799,14 +2854,21 @@ void MapSpace::VerifyObject(HeapObject* object) {
 
 
 // -----------------------------------------------------------------------------
-// GlobalPropertyCellSpace implementation
+// CellSpace and PropertyCellSpace implementation
 // TODO(mvstanton): this is weird...the compiler can't make a vtable unless
 // there is at least one non-inlined virtual function. I would prefer to hide
 // the VerifyObject definition behind VERIFY_HEAP.
 
 void CellSpace::VerifyObject(HeapObject* object) {
   // The object should be a global object property cell or a free-list node.
-  CHECK(object->IsJSGlobalPropertyCell() ||
+  CHECK(object->IsCell() ||
+         object->map() == heap()->two_pointer_filler_map());
+}
+
+
+void PropertyCellSpace::VerifyObject(HeapObject* object) {
+  // The object should be a global object property cell or a free-list node.
+  CHECK(object->IsPropertyCell() ||
          object->map() == heap()->two_pointer_filler_map());
 }
 

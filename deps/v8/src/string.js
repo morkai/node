@@ -25,24 +25,22 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-
 // This file relies on the fact that the following declaration has been made
 // in runtime.js:
 // var $String = global.String;
 // var $NaN = 0/0;
 
+// -------------------------------------------------------------------
 
-// Set the String function and constructor.
-%SetCode($String, function(x) {
+function StringConstructor(x) {
   var value = %_ArgumentsLength() == 0 ? '' : TO_STRING_INLINE(x);
   if (%_IsConstructCall()) {
     %_SetValueOf(this, value);
   } else {
     return value;
   }
-});
+}
 
-%FunctionSetPrototype($String, new $String());
 
 // ECMA-262 section 15.5.4.2
 function StringToString() {
@@ -172,7 +170,6 @@ function StringLocaleCompare(other) {
     throw MakeTypeError("called_on_null_or_undefined",
                         ["String.prototype.localeCompare"]);
   }
-  if (%_ArgumentsLength() === 0) return 0;
   return %StringLocaleCompare(TO_STRING_INLINE(this),
                               TO_STRING_INLINE(other));
 }
@@ -498,8 +495,7 @@ function StringReplaceGlobalRegExpWithFunction(subject, regexp, replace) {
       }
     }
   }
-  var resultBuilder = new ReplaceResultBuilder(subject, res);
-  var result = resultBuilder.generate();
+  var result = %StringBuilderConcat(res, res.length, subject);
   resultArray.length = 0;
   reusableReplaceArray = resultArray;
   return result;
@@ -648,6 +644,8 @@ function StringSplit(separator, limit) {
 }
 
 
+var ArrayPushBuiltin = $Array.prototype.push;
+
 function StringSplitOnRegExp(subject, separator, limit, length) {
   %_Log('regexp', 'regexp-split,%0S,%1r', [subject, separator]);
 
@@ -667,13 +665,15 @@ function StringSplitOnRegExp(subject, separator, limit, length) {
   while (true) {
 
     if (startIndex === length) {
-      result.push(%_SubString(subject, currentIndex, length));
+      %_CallFunction(result, %_SubString(subject, currentIndex, length),
+                     ArrayPushBuiltin);
       break;
     }
 
     var matchInfo = DoRegExpExec(separator, subject, startIndex);
     if (matchInfo == null || length === (startMatch = matchInfo[CAPTURE0])) {
-      result.push(%_SubString(subject, currentIndex, length));
+      %_CallFunction(result, %_SubString(subject, currentIndex, length),
+                     ArrayPushBuiltin);
       break;
     }
     var endIndex = matchInfo[CAPTURE1];
@@ -684,7 +684,8 @@ function StringSplitOnRegExp(subject, separator, limit, length) {
       continue;
     }
 
-    result.push(%_SubString(subject, currentIndex, startMatch));
+    %_CallFunction(result, %_SubString(subject, currentIndex, startMatch),
+                   ArrayPushBuiltin);
 
     if (result.length === limit) break;
 
@@ -693,9 +694,10 @@ function StringSplitOnRegExp(subject, separator, limit, length) {
       var start = matchInfo[i++];
       var end = matchInfo[i++];
       if (end != -1) {
-        result.push(%_SubString(subject, start, end));
+        %_CallFunction(result, %_SubString(subject, start, end),
+                       ArrayPushBuiltin);
       } else {
-        result.push(void 0);
+        %_CallFunction(result, void 0, ArrayPushBuiltin);
       }
       if (result.length === limit) break outer_loop;
     }
@@ -953,56 +955,22 @@ function StringSup() {
   return "<sup>" + this + "</sup>";
 }
 
-
-// ReplaceResultBuilder support.
-function ReplaceResultBuilder(str) {
-  if (%_ArgumentsLength() > 1) {
-    this.elements = %_Arguments(1);
-  } else {
-    this.elements = new InternalArray();
-  }
-  this.special_string = str;
-}
-
-SetUpLockedPrototype(ReplaceResultBuilder,
-  $Array("elements", "special_string"), $Array(
-  "add", function(str) {
-    str = TO_STRING_INLINE(str);
-    if (str.length > 0) this.elements.push(str);
-  },
-  "addSpecialSlice", function(start, end) {
-    var len = end - start;
-    if (start < 0 || len <= 0) return;
-    if (start < 0x80000 && len < 0x800) {
-      this.elements.push((start << 11) | len);
-    } else {
-      // 0 < len <= String::kMaxLength and Smi::kMaxValue >= String::kMaxLength,
-      // so -len is a smi.
-      var elements = this.elements;
-      elements.push(-len);
-      elements.push(start);
-    }
-  },
-  "generate", function() {
-    var elements = this.elements;
-    return %StringBuilderConcat(elements, elements.length, this.special_string);
-  }
-));
-
-
 // -------------------------------------------------------------------
 
 function SetUpString() {
   %CheckIsBootstrapping();
+
+  // Set the String function and constructor.
+  %SetCode($String, StringConstructor);
+  %FunctionSetPrototype($String, new $String());
+
   // Set up the constructor property on the String prototype object.
   %SetProperty($String.prototype, "constructor", $String, DONT_ENUM);
-
 
   // Set up the non-enumerable functions on the String object.
   InstallFunctions($String, DONT_ENUM, $Array(
     "fromCharCode", StringFromCharCode
   ));
-
 
   // Set up the non-enumerable functions on the String prototype object.
   InstallFunctions($String.prototype, DONT_ENUM, $Array(

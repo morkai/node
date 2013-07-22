@@ -39,6 +39,11 @@ namespace internal {
 
 class Factory {
  public:
+  // Allocate a new boxed value.
+  Handle<Box> NewBox(
+      Handle<Object> value,
+      PretenureFlag pretenure = NOT_TENURED);
+
   // Allocate a new uninitialized fixed array.
   Handle<FixedArray> NewFixedArray(
       int size,
@@ -147,6 +152,10 @@ class Factory {
   Handle<String> NewConsString(Handle<String> first,
                                Handle<String> second);
 
+  // Create a new sequential string containing the concatenation of the inputs.
+  Handle<String> NewFlatConcatString(Handle<String> first,
+                                     Handle<String> second);
+
   // Create a new string object which holds a substring of a string.
   Handle<String> NewSubString(Handle<String> str,
                               int begin,
@@ -230,8 +239,9 @@ class Factory {
       void* external_pointer,
       PretenureFlag pretenure = NOT_TENURED);
 
-  Handle<JSGlobalPropertyCell> NewJSGlobalPropertyCell(
-      Handle<Object> value);
+  Handle<Cell> NewCell(Handle<Object> value);
+
+  Handle<PropertyCell> NewPropertyCell(Handle<Object> value);
 
   Handle<Map> NewMap(
       InstanceType type,
@@ -266,6 +276,11 @@ class Factory {
                                   PretenureFlag pretenure = NOT_TENURED);
   Handle<Object> NewNumberFromUint(uint32_t value,
                                   PretenureFlag pretenure = NOT_TENURED);
+  inline Handle<Object> NewNumberFromSize(size_t value,
+                                   PretenureFlag pretenure = NOT_TENURED);
+  Handle<HeapNumber> NewHeapNumber(double value,
+                                   PretenureFlag pretenure = NOT_TENURED);
+
 
   // These objects are used by the api to create env-independent data
   // structures in the heap.
@@ -313,6 +328,12 @@ class Factory {
                                 uint32_t length,
                                 EnsureElementsMode mode);
 
+  Handle<JSArrayBuffer> NewJSArrayBuffer();
+
+  Handle<JSTypedArray> NewJSTypedArray(ExternalArrayType type);
+
+  Handle<JSDataView> NewJSDataView();
+
   Handle<JSProxy> NewJSProxy(Handle<Object> handler, Handle<Object> prototype);
 
   // Change the type of the argument into a JS object/function and reinitialize.
@@ -347,7 +368,8 @@ class Factory {
   Handle<Code> NewCode(const CodeDesc& desc,
                        Code::Flags flags,
                        Handle<Object> self_reference,
-                       bool immovable = false);
+                       bool immovable = false,
+                       bool crankshafted = false);
 
   Handle<Code> CopyCode(Handle<Code> code);
 
@@ -359,33 +381,33 @@ class Factory {
 
   // Interface for creating error objects.
 
-  Handle<Object> NewError(const char* maker, const char* type,
+  Handle<Object> NewError(const char* maker, const char* message,
                           Handle<JSArray> args);
-  Handle<String> EmergencyNewError(const char* type, Handle<JSArray> args);
-  Handle<Object> NewError(const char* maker, const char* type,
+  Handle<String> EmergencyNewError(const char* message, Handle<JSArray> args);
+  Handle<Object> NewError(const char* maker, const char* message,
                           Vector< Handle<Object> > args);
-  Handle<Object> NewError(const char* type,
+  Handle<Object> NewError(const char* message,
                           Vector< Handle<Object> > args);
   Handle<Object> NewError(Handle<String> message);
   Handle<Object> NewError(const char* constructor,
                           Handle<String> message);
 
-  Handle<Object> NewTypeError(const char* type,
+  Handle<Object> NewTypeError(const char* message,
                               Vector< Handle<Object> > args);
   Handle<Object> NewTypeError(Handle<String> message);
 
-  Handle<Object> NewRangeError(const char* type,
+  Handle<Object> NewRangeError(const char* message,
                                Vector< Handle<Object> > args);
   Handle<Object> NewRangeError(Handle<String> message);
 
-  Handle<Object> NewSyntaxError(const char* type, Handle<JSArray> args);
+  Handle<Object> NewSyntaxError(const char* message, Handle<JSArray> args);
   Handle<Object> NewSyntaxError(Handle<String> message);
 
-  Handle<Object> NewReferenceError(const char* type,
+  Handle<Object> NewReferenceError(const char* message,
                                    Vector< Handle<Object> > args);
   Handle<Object> NewReferenceError(Handle<String> message);
 
-  Handle<Object> NewEvalError(const char* type,
+  Handle<Object> NewEvalError(const char* message,
                               Vector< Handle<Object> > args);
 
 
@@ -454,6 +476,7 @@ class Factory {
   Handle<SharedFunctionInfo> NewSharedFunctionInfo(
       Handle<String> name,
       int number_of_literals,
+      bool is_generator,
       Handle<Code> code,
       Handle<ScopeInfo> scope_info);
   Handle<SharedFunctionInfo> NewSharedFunctionInfo(Handle<String> name);
@@ -528,6 +551,18 @@ class Factory {
                                  Handle<FixedArray> keys,
                                  Handle<Map> map);
 };
+
+
+Handle<Object> Factory::NewNumberFromSize(size_t value,
+                                          PretenureFlag pretenure) {
+  if (Smi::IsValid(static_cast<intptr_t>(value))) {
+    return Handle<Object>(Smi::FromIntptr(static_cast<intptr_t>(value)),
+                          isolate());
+  } else {
+    return NewNumber(static_cast<double>(value), pretenure);
+  }
+}
+
 
 
 } }  // namespace v8::internal

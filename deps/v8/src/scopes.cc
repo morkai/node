@@ -104,7 +104,7 @@ Variable* VariableMap::Lookup(Handle<String> name) {
 // ----------------------------------------------------------------------------
 // Implementation of Scope
 
-Scope::Scope(Scope* outer_scope, ScopeType type, Zone* zone)
+Scope::Scope(Scope* outer_scope, ScopeType scope_type, Zone* zone)
     : isolate_(zone->isolate()),
       inner_scopes_(4, zone),
       variables_(zone),
@@ -114,19 +114,19 @@ Scope::Scope(Scope* outer_scope, ScopeType type, Zone* zone)
       unresolved_(16, zone),
       decls_(4, zone),
       interface_(FLAG_harmony_modules &&
-                 (type == MODULE_SCOPE || type == GLOBAL_SCOPE)
+                 (scope_type == MODULE_SCOPE || scope_type == GLOBAL_SCOPE)
                      ? Interface::NewModule(zone) : NULL),
       already_resolved_(false),
       zone_(zone) {
-  SetDefaults(type, outer_scope, Handle<ScopeInfo>::null());
+  SetDefaults(scope_type, outer_scope, Handle<ScopeInfo>::null());
   // The outermost scope must be a global scope.
-  ASSERT(type == GLOBAL_SCOPE || outer_scope != NULL);
+  ASSERT(scope_type == GLOBAL_SCOPE || outer_scope != NULL);
   ASSERT(!HasIllegalRedeclaration());
 }
 
 
 Scope::Scope(Scope* inner_scope,
-             ScopeType type,
+             ScopeType scope_type,
              Handle<ScopeInfo> scope_info,
              Zone* zone)
     : isolate_(Isolate::Current()),
@@ -140,7 +140,7 @@ Scope::Scope(Scope* inner_scope,
       interface_(NULL),
       already_resolved_(true),
       zone_(zone) {
-  SetDefaults(type, NULL, scope_info);
+  SetDefaults(scope_type, NULL, scope_info);
   if (!scope_info.is_null()) {
     num_heap_slots_ = scope_info_->ContextLength();
   }
@@ -177,11 +177,11 @@ Scope::Scope(Scope* inner_scope, Handle<String> catch_variable_name, Zone* zone)
 }
 
 
-void Scope::SetDefaults(ScopeType type,
+void Scope::SetDefaults(ScopeType scope_type,
                         Scope* outer_scope,
                         Handle<ScopeInfo> scope_info) {
   outer_scope_ = outer_scope;
-  type_ = type;
+  scope_type_ = scope_type;
   scope_name_ = isolate_->factory()->empty_string();
   dynamics_ = NULL;
   receiver_ = NULL;
@@ -197,6 +197,8 @@ void Scope::SetDefaults(ScopeType type,
   outer_scope_calls_non_strict_eval_ = false;
   inner_scope_calls_eval_ = false;
   force_eager_compilation_ = false;
+  force_context_allocation_ = (outer_scope != NULL && !is_function_scope())
+      ? outer_scope->has_forced_context_allocation() : false;
   num_var_or_const_ = 0;
   num_stack_slots_ = 0;
   num_heap_slots_ = 0;
@@ -603,12 +605,18 @@ void Scope::CollectStackAndContextLocals(ZoneList<Variable*>* stack_locals,
     }
   }
 
-  // Collect temporaries which are always allocated on the stack.
+  // Collect temporaries which are always allocated on the stack, unless the
+  // context as a whole has forced context allocation.
   for (int i = 0; i < temps_.length(); i++) {
     Variable* var = temps_[i];
     if (var->is_used()) {
-      ASSERT(var->IsStackLocal());
-      stack_locals->Add(var, zone());
+      if (var->IsContextSlot()) {
+        ASSERT(has_forced_context_allocation());
+        context_locals->Add(var, zone());
+      } else {
+        ASSERT(var->IsStackLocal());
+        stack_locals->Add(var, zone());
+      }
     }
   }
 
@@ -718,7 +726,10 @@ int Scope::ContextChainLength(Scope* scope) {
   int n = 0;
   for (Scope* s = this; s != scope; s = s->outer_scope_) {
     ASSERT(s != NULL);  // scope must be in the scope chain
-    if (s->num_heap_slots() > 0) n++;
+    if (s->is_with_scope() || s->num_heap_slots() > 0) n++;
+    // Catch and module scopes always have heap slots.
+    ASSERT(!s->is_catch_scope() || s->num_heap_slots() > 0);
+    ASSERT(!s->is_module_scope() || s->num_heap_slots() > 0);
   }
   return n;
 }
@@ -769,8 +780,8 @@ void Scope::GetNestedScopeChain(
 
 
 #ifdef DEBUG
-static const char* Header(ScopeType type) {
-  switch (type) {
+static const char* Header(ScopeType scope_type) {
+  switch (scope_type) {
     case EVAL_SCOPE: return "eval";
     case FUNCTION_SCOPE: return "function";
     case MODULE_SCOPE: return "module";
@@ -844,7 +855,7 @@ void Scope::Print(int n) {
   int n1 = n0 + 2;  // indentation
 
   // Print header.
-  Indent(n0, Header(type_));
+  Indent(n0, Header(scope_type_));
   if (scope_name_->length() > 0) {
     PrintF(" ");
     PrintName(scope_name_);
@@ -1182,8 +1193,11 @@ bool Scope::MustAllocateInContext(Variable* var) {
   // an eval() call or a runtime with lookup), it must be allocated in the
   // context.
   //
-  // Exceptions: temporary variables are never allocated in a context;
-  // catch-bound variables are always allocated in a context.
+  // Exceptions: If the scope as a whole has forced context allocation, all
+  // variables will have context allocation, even temporaries.  Otherwise
+  // temporary variables are always stack-allocated.  Catch-bound variables are
+  // always context-allocated.
+  if (has_forced_context_allocation()) return true;
   if (var->mode() == TEMPORARY) return false;
   if (var->mode() == INTERNAL) return true;
   if (is_catch_scope() || is_block_scope() || is_module_scope()) return true;

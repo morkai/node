@@ -107,6 +107,8 @@ enum BuiltinExtraArguments {
                                     Code::kNoExtraICState)              \
   V(NotifyDeoptimized,              BUILTIN, UNINITIALIZED,             \
                                     Code::kNoExtraICState)              \
+  V(NotifySoftDeoptimized,          BUILTIN, UNINITIALIZED,             \
+                                    Code::kNoExtraICState)              \
   V(NotifyLazyDeoptimized,          BUILTIN, UNINITIALIZED,             \
                                     Code::kNoExtraICState)              \
   V(NotifyStubFailure,              BUILTIN, UNINITIALIZED,             \
@@ -124,6 +126,8 @@ enum BuiltinExtraArguments {
                                     Code::kNoExtraICState)              \
   V(StoreIC_Miss,                   BUILTIN, UNINITIALIZED,             \
                                     Code::kNoExtraICState)              \
+  V(StoreIC_Slow,                   BUILTIN, UNINITIALIZED,             \
+                                    Code::kNoExtraICState)              \
   V(KeyedStoreIC_Miss,              BUILTIN, UNINITIALIZED,             \
                                     Code::kNoExtraICState)              \
   V(KeyedStoreIC_MissForceGeneric,  BUILTIN, UNINITIALIZED,             \
@@ -139,6 +143,8 @@ enum BuiltinExtraArguments {
   V(LoadIC_Megamorphic,             LOAD_IC, MEGAMORPHIC,               \
                                     Code::kNoExtraICState)              \
   V(LoadIC_Getter_ForDeopt,         LOAD_IC, MONOMORPHIC,               \
+                                    Code::kNoExtraICState)              \
+  V(LoadIC_Slow,                    LOAD_IC, GENERIC,                   \
                                     Code::kNoExtraICState)              \
                                                                         \
   V(KeyedLoadIC_Initialize,         KEYED_LOAD_IC, UNINITIALIZED,       \
@@ -160,6 +166,10 @@ enum BuiltinExtraArguments {
                                     Code::kNoExtraICState)              \
   V(StoreIC_Megamorphic,            STORE_IC, MEGAMORPHIC,              \
                                     Code::kNoExtraICState)              \
+  V(StoreIC_Generic,                STORE_IC, GENERIC,                  \
+                                    Code::kNoExtraICState)              \
+  V(StoreIC_Generic_Strict,         STORE_IC, GENERIC,                  \
+                                    kStrictMode)                        \
   V(StoreIC_GlobalProxy,            STORE_IC, GENERIC,                  \
                                     Code::kNoExtraICState)              \
   V(StoreIC_Initialize_Strict,      STORE_IC, UNINITIALIZED,            \
@@ -199,8 +209,6 @@ enum BuiltinExtraArguments {
                                     Code::kNoExtraICState)              \
   V(ArrayCode,                      BUILTIN, UNINITIALIZED,             \
                                     Code::kNoExtraICState)              \
-  V(ArrayConstructCode,             BUILTIN, UNINITIALIZED,             \
-                                    Code::kNoExtraICState)              \
                                                                         \
   V(StringConstructCode,            BUILTIN, UNINITIALIZED,             \
                                     Code::kNoExtraICState)              \
@@ -229,6 +237,8 @@ enum BuiltinExtraArguments {
   V(StoreIC_DebugBreak,                        STORE_IC, DEBUG_STUB,          \
                                                DEBUG_BREAK)                   \
   V(KeyedStoreIC_DebugBreak,                   KEYED_STORE_IC, DEBUG_STUB,    \
+                                               DEBUG_BREAK)                   \
+  V(CompareNilIC_DebugBreak,                   COMPARE_NIL_IC, DEBUG_STUB,    \
                                                DEBUG_BREAK)                   \
   V(Slot_DebugBreak,                           BUILTIN, DEBUG_STUB,           \
                                                DEBUG_BREAK)                   \
@@ -273,8 +283,6 @@ enum BuiltinExtraArguments {
   V(STRING_ADD_RIGHT, 1)                 \
   V(APPLY_PREPARE, 1)                    \
   V(APPLY_OVERFLOW, 1)
-
-MaybeObject* ArrayConstructor_StubFailure(Arguments args, Isolate* isolate);
 
 class BuiltinFunctionTable;
 class ObjectVisitor;
@@ -378,6 +386,7 @@ class Builtins {
   static void Generate_LazyCompile(MacroAssembler* masm);
   static void Generate_LazyRecompile(MacroAssembler* masm);
   static void Generate_NotifyDeoptimized(MacroAssembler* masm);
+  static void Generate_NotifySoftDeoptimized(MacroAssembler* masm);
   static void Generate_NotifyLazyDeoptimized(MacroAssembler* masm);
   static void Generate_NotifyOSR(MacroAssembler* masm);
   static void Generate_NotifyStubFailure(MacroAssembler* masm);
@@ -388,7 +397,6 @@ class Builtins {
 
   static void Generate_InternalArrayCode(MacroAssembler* masm);
   static void Generate_ArrayCode(MacroAssembler* masm);
-  static void Generate_ArrayConstructCode(MacroAssembler* masm);
 
   static void Generate_StringConstructCode(MacroAssembler* masm);
   static void Generate_OnStackReplacement(MacroAssembler* masm);

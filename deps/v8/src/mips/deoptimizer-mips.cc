@@ -1,3 +1,4 @@
+
 // Copyright 2011 the V8 project authors. All rights reserved.
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
@@ -46,18 +47,17 @@ void Deoptimizer::DeoptimizeFunctionWithPreparedFunctionList(
     JSFunction* function) {
   Isolate* isolate = function->GetIsolate();
   HandleScope scope(isolate);
-  AssertNoAllocation no_allocation;
+  DisallowHeapAllocation nha;
 
   ASSERT(function->IsOptimized());
   ASSERT(function->FunctionsInFunctionListShareSameCode());
 
-  // The optimized code is going to be patched, so we cannot use it
-  // any more.  Play safe and reset the whole cache.
-  function->shared()->ClearOptimizedCodeMap();
-
   // Get the optimized code.
   Code* code = function->code();
   Address code_start_address = code->instruction_start();
+
+  // The optimized code is going to be patched, so we cannot use it any more.
+  function->shared()->EvictFromOptimizedCodeMap(code, "deoptimized function");
 
   // Invalidate the relocation information, as it will become invalid by the
   // code patching below, and is not needed any more.
@@ -116,74 +116,91 @@ void Deoptimizer::DeoptimizeFunctionWithPreparedFunctionList(
 }
 
 
-void Deoptimizer::PatchStackCheckCodeAt(Code* unoptimized_code,
+// This structure comes from FullCodeGenerator::EmitBackEdgeBookkeeping.
+// The back edge bookkeeping code matches the pattern:
+//
+// sltu at, sp, t0 / slt at, a3, zero_reg (in case of count based interrupts)
+// beq at, zero_reg, ok
+// lui t9, <interrupt stub address> upper
+// ori t9, <interrupt stub address> lower
+// jalr t9
+// nop
+// ok-label ----- pc_after points here
+//
+// We patch the code to the following form:
+//
+// addiu at, zero_reg, 1
+// beq at, zero_reg, ok  ;; Not changed
+// lui t9, <on-stack replacement address> upper
+// ori t9, <on-stack replacement address> lower
+// jalr t9  ;; Not changed
+// nop  ;; Not changed
+// ok-label ----- pc_after points here
+
+void Deoptimizer::PatchInterruptCodeAt(Code* unoptimized_code,
                                         Address pc_after,
-                                        Code* check_code,
+                                        Code* interrupt_code,
                                         Code* replacement_code) {
-  const int kInstrSize = Assembler::kInstrSize;
-  // This structure comes from FullCodeGenerator::EmitBackEdgeBookkeeping.
-  // The call of the stack guard check has the following form:
-  // sltu at, sp, t0 / slt at, a3, zero_reg (in case of count based interrupts)
-  // beq at, zero_reg, ok
-  // lui t9, <stack guard address> upper
-  // ori t9, <stack guard address> lower
-  // jalr t9
-  // nop
-  // ----- pc_after points here
-
-  ASSERT(Assembler::IsBeq(Assembler::instr_at(pc_after - 5 * kInstrSize)));
-
+  ASSERT(!InterruptCodeIsPatched(unoptimized_code,
+                                 pc_after,
+                                 interrupt_code,
+                                 replacement_code));
+  static const int kInstrSize = Assembler::kInstrSize;
   // Replace the sltu instruction with load-imm 1 to at, so beq is not taken.
   CodePatcher patcher(pc_after - 6 * kInstrSize, 1);
   patcher.masm()->addiu(at, zero_reg, 1);
-
   // Replace the stack check address in the load-immediate (lui/ori pair)
   // with the entry address of the replacement code.
-  ASSERT(reinterpret_cast<uint32_t>(
-      Assembler::target_address_at(pc_after - 4 * kInstrSize)) ==
-      reinterpret_cast<uint32_t>(check_code->entry()));
   Assembler::set_target_address_at(pc_after - 4 * kInstrSize,
                                    replacement_code->entry());
-
-  // We patched the code to the following form:
-  // addiu at, zero_reg, 1
-  // beq at, zero_reg, ok  ;; Not changed
-  // lui t9, <on-stack replacement address> upper
-  // ori t9, <on-stack replacement address> lower
-  // jalr t9  ;; Not changed
-  // nop  ;; Not changed
-  // ----- pc_after points here
 
   unoptimized_code->GetHeap()->incremental_marking()->RecordCodeTargetPatch(
       unoptimized_code, pc_after - 4 * kInstrSize, replacement_code);
 }
 
 
-void Deoptimizer::RevertStackCheckCodeAt(Code* unoptimized_code,
-                                         Address pc_after,
-                                         Code* check_code,
-                                         Code* replacement_code) {
-  // Exact opposite of the function above.
-  const int kInstrSize = Assembler::kInstrSize;
-  ASSERT(Assembler::IsAddImmediate(
-      Assembler::instr_at(pc_after - 6 * kInstrSize)));
-  ASSERT(Assembler::IsBeq(Assembler::instr_at(pc_after - 5 * kInstrSize)));
-
+void Deoptimizer::RevertInterruptCodeAt(Code* unoptimized_code,
+                                        Address pc_after,
+                                        Code* interrupt_code,
+                                        Code* replacement_code) {
+  ASSERT(InterruptCodeIsPatched(unoptimized_code,
+                                 pc_after,
+                                 interrupt_code,
+                                 replacement_code));
+  static const int kInstrSize = Assembler::kInstrSize;
   // Restore the sltu instruction so beq can be taken again.
   CodePatcher patcher(pc_after - 6 * kInstrSize, 1);
   patcher.masm()->slt(at, a3, zero_reg);
-
-  // Replace the on-stack replacement address in the load-immediate (lui/ori
-  // pair) with the entry address of the normal stack-check code.
-  ASSERT(reinterpret_cast<uint32_t>(
-      Assembler::target_address_at(pc_after - 4 * kInstrSize)) ==
-      reinterpret_cast<uint32_t>(replacement_code->entry()));
+  // Restore the original call address.
   Assembler::set_target_address_at(pc_after - 4 * kInstrSize,
-                                   check_code->entry());
+                                   interrupt_code->entry());
 
-  check_code->GetHeap()->incremental_marking()->RecordCodeTargetPatch(
-      unoptimized_code, pc_after - 4 * kInstrSize, check_code);
+  interrupt_code->GetHeap()->incremental_marking()->RecordCodeTargetPatch(
+      unoptimized_code, pc_after - 4 * kInstrSize, interrupt_code);
 }
+
+
+#ifdef DEBUG
+bool Deoptimizer::InterruptCodeIsPatched(Code* unoptimized_code,
+                                         Address pc_after,
+                                         Code* interrupt_code,
+                                         Code* replacement_code) {
+  static const int kInstrSize = Assembler::kInstrSize;
+  ASSERT(Assembler::IsBeq(Assembler::instr_at(pc_after - 5 * kInstrSize)));
+  if (Assembler::IsAddImmediate(
+      Assembler::instr_at(pc_after - 6 * kInstrSize))) {
+    ASSERT(reinterpret_cast<uint32_t>(
+        Assembler::target_address_at(pc_after - 4 * kInstrSize)) ==
+        reinterpret_cast<uint32_t>(replacement_code->entry()));
+    return true;
+  } else {
+    ASSERT(reinterpret_cast<uint32_t>(
+        Assembler::target_address_at(pc_after - 4 * kInstrSize)) ==
+        reinterpret_cast<uint32_t>(interrupt_code->entry()));
+    return false;
+  }
+}
+#endif  // DEBUG
 
 
 static int LookupBailoutId(DeoptimizationInputData* data, BailoutId ast_id) {
@@ -249,7 +266,7 @@ void Deoptimizer::DoComputeOsrOutputFrame() {
   if (FLAG_trace_osr) {
     PrintF("[on-stack replacement: begin 0x%08" V8PRIxPTR " ",
            reinterpret_cast<intptr_t>(function_));
-    function_->PrintName();
+    PrintFunctionName();
     PrintF(" => node=%u, frame=%d->%d]\n",
            ast_id,
            input_frame_size,
@@ -343,184 +360,11 @@ void Deoptimizer::DoComputeOsrOutputFrame() {
     PrintF("[on-stack replacement translation %s: 0x%08" V8PRIxPTR " ",
            ok ? "finished" : "aborted",
            reinterpret_cast<intptr_t>(function_));
-    function_->PrintName();
+    PrintFunctionName();
     PrintF(" => pc=0x%0x]\n", output_[0]->GetPc());
   }
 }
 
-
-// This code is very similar to ia32/arm code, but relies on register names
-// (fp, sp) and how the frame is laid out.
-void Deoptimizer::DoComputeJSFrame(TranslationIterator* iterator,
-                                   int frame_index) {
-  // Read the ast node id, function, and frame height for this output frame.
-  BailoutId node_id = BailoutId(iterator->Next());
-  JSFunction* function;
-  if (frame_index != 0) {
-    function = JSFunction::cast(ComputeLiteral(iterator->Next()));
-  } else {
-    int closure_id = iterator->Next();
-    USE(closure_id);
-    ASSERT_EQ(Translation::kSelfLiteralId, closure_id);
-    function = function_;
-  }
-  unsigned height = iterator->Next();
-  unsigned height_in_bytes = height * kPointerSize;
-  if (trace_) {
-    PrintF("  translating ");
-    function->PrintName();
-    PrintF(" => node=%d, height=%d\n", node_id.ToInt(), height_in_bytes);
-  }
-
-  // The 'fixed' part of the frame consists of the incoming parameters and
-  // the part described by JavaScriptFrameConstants.
-  unsigned fixed_frame_size = ComputeFixedSize(function);
-  unsigned input_frame_size = input_->GetFrameSize();
-  unsigned output_frame_size = height_in_bytes + fixed_frame_size;
-
-  // Allocate and store the output frame description.
-  FrameDescription* output_frame =
-      new(output_frame_size) FrameDescription(output_frame_size, function);
-  output_frame->SetFrameType(StackFrame::JAVA_SCRIPT);
-
-  bool is_bottommost = (0 == frame_index);
-  bool is_topmost = (output_count_ - 1 == frame_index);
-  ASSERT(frame_index >= 0 && frame_index < output_count_);
-  ASSERT(output_[frame_index] == NULL);
-  output_[frame_index] = output_frame;
-
-  // The top address for the bottommost output frame can be computed from
-  // the input frame pointer and the output frame's height.  For all
-  // subsequent output frames, it can be computed from the previous one's
-  // top address and the current frame's size.
-  uint32_t top_address;
-  if (is_bottommost) {
-    // 2 = context and function in the frame.
-    top_address =
-        input_->GetRegister(fp.code()) - (2 * kPointerSize) - height_in_bytes;
-  } else {
-    top_address = output_[frame_index - 1]->GetTop() - output_frame_size;
-  }
-  output_frame->SetTop(top_address);
-
-  // Compute the incoming parameter translation.
-  int parameter_count = function->shared()->formal_parameter_count() + 1;
-  unsigned output_offset = output_frame_size;
-  unsigned input_offset = input_frame_size;
-  for (int i = 0; i < parameter_count; ++i) {
-    output_offset -= kPointerSize;
-    DoTranslateCommand(iterator, frame_index, output_offset);
-  }
-  input_offset -= (parameter_count * kPointerSize);
-
-  // There are no translation commands for the caller's pc and fp, the
-  // context, and the function.  Synthesize their values and set them up
-  // explicitly.
-  //
-  // The caller's pc for the bottommost output frame is the same as in the
-  // input frame.  For all subsequent output frames, it can be read from the
-  // previous one.  This frame's pc can be computed from the non-optimized
-  // function code and AST id of the bailout.
-  output_offset -= kPointerSize;
-  input_offset -= kPointerSize;
-  intptr_t value;
-  if (is_bottommost) {
-    value = input_->GetFrameSlot(input_offset);
-  } else {
-    value = output_[frame_index - 1]->GetPc();
-  }
-  output_frame->SetFrameSlot(output_offset, value);
-  if (trace_) {
-    PrintF("    0x%08x: [top + %d] <- 0x%08x ; caller's pc\n",
-           top_address + output_offset, output_offset, value);
-  }
-
-  // The caller's frame pointer for the bottommost output frame is the same
-  // as in the input frame.  For all subsequent output frames, it can be
-  // read from the previous one.  Also compute and set this frame's frame
-  // pointer.
-  output_offset -= kPointerSize;
-  input_offset -= kPointerSize;
-  if (is_bottommost) {
-    value = input_->GetFrameSlot(input_offset);
-  } else {
-    value = output_[frame_index - 1]->GetFp();
-  }
-  output_frame->SetFrameSlot(output_offset, value);
-  intptr_t fp_value = top_address + output_offset;
-  ASSERT(!is_bottommost || input_->GetRegister(fp.code()) == fp_value);
-  output_frame->SetFp(fp_value);
-  if (is_topmost) {
-    output_frame->SetRegister(fp.code(), fp_value);
-  }
-  if (trace_) {
-    PrintF("    0x%08x: [top + %d] <- 0x%08x ; caller's fp\n",
-           fp_value, output_offset, value);
-  }
-
-  // For the bottommost output frame the context can be gotten from the input
-  // frame. For all subsequent output frames it can be gotten from the function
-  // so long as we don't inline functions that need local contexts.
-  output_offset -= kPointerSize;
-  input_offset -= kPointerSize;
-  if (is_bottommost) {
-    value = input_->GetFrameSlot(input_offset);
-  } else {
-    value = reinterpret_cast<intptr_t>(function->context());
-  }
-  output_frame->SetFrameSlot(output_offset, value);
-  output_frame->SetContext(value);
-  if (is_topmost) output_frame->SetRegister(cp.code(), value);
-  if (trace_) {
-    PrintF("    0x%08x: [top + %d] <- 0x%08x ; context\n",
-           top_address + output_offset, output_offset, value);
-  }
-
-  // The function was mentioned explicitly in the BEGIN_FRAME.
-  output_offset -= kPointerSize;
-  input_offset -= kPointerSize;
-  value = reinterpret_cast<uint32_t>(function);
-  // The function for the bottommost output frame should also agree with the
-  // input frame.
-  ASSERT(!is_bottommost || input_->GetFrameSlot(input_offset) == value);
-  output_frame->SetFrameSlot(output_offset, value);
-  if (trace_) {
-    PrintF("    0x%08x: [top + %d] <- 0x%08x ; function\n",
-           top_address + output_offset, output_offset, value);
-  }
-
-  // Translate the rest of the frame.
-  for (unsigned i = 0; i < height; ++i) {
-    output_offset -= kPointerSize;
-    DoTranslateCommand(iterator, frame_index, output_offset);
-  }
-  ASSERT(0 == output_offset);
-
-  // Compute this frame's PC, state, and continuation.
-  Code* non_optimized_code = function->shared()->code();
-  FixedArray* raw_data = non_optimized_code->deoptimization_data();
-  DeoptimizationOutputData* data = DeoptimizationOutputData::cast(raw_data);
-  Address start = non_optimized_code->instruction_start();
-  unsigned pc_and_state = GetOutputInfo(data, node_id, function->shared());
-  unsigned pc_offset = FullCodeGenerator::PcField::decode(pc_and_state);
-  uint32_t pc_value = reinterpret_cast<uint32_t>(start + pc_offset);
-  output_frame->SetPc(pc_value);
-
-  FullCodeGenerator::State state =
-      FullCodeGenerator::StateField::decode(pc_and_state);
-  output_frame->SetState(Smi::FromInt(state));
-
-
-  // Set the continuation for the topmost frame.
-  if (is_topmost && bailout_type_ != DEBUGGER) {
-    Builtins* builtins = isolate_->builtins();
-    Code* continuation = (bailout_type_ == EAGER)
-        ? builtins->builtin(Builtins::kNotifyDeoptimized)
-        : builtins->builtin(Builtins::kNotifyLazyDeoptimized);
-    output_frame->SetContinuation(
-        reinterpret_cast<uint32_t>(continuation->entry()));
-  }
-}
 
 void Deoptimizer::FillInputFrame(Address tos, JavaScriptFrame* frame) {
   // Set the register values. The values are not important as there are no
@@ -566,6 +410,12 @@ void Deoptimizer::CopyDoubleRegisters(FrameDescription* output_frame) {
 }
 
 
+bool Deoptimizer::HasAlignmentPadding(JSFunction* function) {
+  // There is no dynamic alignment padding on MIPS in the input frame.
+  return false;
+}
+
+
 #define __ masm()->
 
 
@@ -573,8 +423,6 @@ void Deoptimizer::CopyDoubleRegisters(FrameDescription* output_frame) {
 // easily ported.
 void Deoptimizer::EntryGenerator::Generate() {
   GeneratePrologue();
-
-  Isolate* isolate = masm()->isolate();
 
   // Unlike on ARM we don't save all the registers, just the useful ones.
   // For the rest, there are gaps on the stack, so the offsets remain the same.
@@ -586,17 +434,12 @@ void Deoptimizer::EntryGenerator::Generate() {
   const int kDoubleRegsSize =
       kDoubleSize * FPURegister::kMaxNumAllocatableRegisters;
 
-  if (CpuFeatures::IsSupported(FPU)) {
-    CpuFeatureScope scope(masm(), FPU);
-    // Save all FPU registers before messing with them.
-    __ Subu(sp, sp, Operand(kDoubleRegsSize));
-    for (int i = 0; i < FPURegister::kMaxNumAllocatableRegisters; ++i) {
-      FPURegister fpu_reg = FPURegister::FromAllocationIndex(i);
-      int offset = i * kDoubleSize;
-      __ sdc1(fpu_reg, MemOperand(sp, offset));
-    }
-  } else {
-    __ Subu(sp, sp, Operand(kDoubleRegsSize));
+  // Save all FPU registers before messing with them.
+  __ Subu(sp, sp, Operand(kDoubleRegsSize));
+  for (int i = 0; i < FPURegister::kMaxNumAllocatableRegisters; ++i) {
+    FPURegister fpu_reg = FPURegister::FromAllocationIndex(i);
+    int offset = i * kDoubleSize;
+    __ sdc1(fpu_reg, MemOperand(sp, offset));
   }
 
   // Push saved_regs (needed to populate FrameDescription::registers_).
@@ -617,7 +460,7 @@ void Deoptimizer::EntryGenerator::Generate() {
   // Get the address of the location in the code object if possible (a3) (return
   // address for lazy deoptimization) and compute the fp-to-sp delta in
   // register t0.
-  if (type() == EAGER) {
+  if (type() == EAGER || type() == SOFT) {
     __ mov(a3, zero_reg);
     // Correct one word for bailout id.
     __ Addu(t0, sp, Operand(kSavedRegistersAreaSize + (1 * kPointerSize)));
@@ -641,12 +484,12 @@ void Deoptimizer::EntryGenerator::Generate() {
   // a2: bailout id already loaded.
   // a3: code address or 0 already loaded.
   __ sw(t0, CFunctionArgumentOperand(5));  // Fp-to-sp delta.
-  __ li(t1, Operand(ExternalReference::isolate_address()));
+  __ li(t1, Operand(ExternalReference::isolate_address(isolate())));
   __ sw(t1, CFunctionArgumentOperand(6));  // Isolate.
   // Call Deoptimizer::New().
   {
     AllowExternalCallThatCantCauseGC scope(masm());
-    __ CallCFunction(ExternalReference::new_deoptimizer_function(isolate), 6);
+    __ CallCFunction(ExternalReference::new_deoptimizer_function(isolate()), 6);
   }
 
   // Preserve "deoptimizer" object in register v0 and get the input
@@ -669,21 +512,18 @@ void Deoptimizer::EntryGenerator::Generate() {
   }
 
   int double_regs_offset = FrameDescription::double_registers_offset();
-  if (CpuFeatures::IsSupported(FPU)) {
-    CpuFeatureScope scope(masm(), FPU);
-    // Copy FPU registers to
-    // double_registers_[DoubleRegister::kNumAllocatableRegisters]
-    for (int i = 0; i < FPURegister::NumAllocatableRegisters(); ++i) {
-      int dst_offset = i * kDoubleSize + double_regs_offset;
-      int src_offset = i * kDoubleSize + kNumberOfRegisters * kPointerSize;
-      __ ldc1(f0, MemOperand(sp, src_offset));
-      __ sdc1(f0, MemOperand(a1, dst_offset));
-    }
+  // Copy FPU registers to
+  // double_registers_[DoubleRegister::kNumAllocatableRegisters]
+  for (int i = 0; i < FPURegister::NumAllocatableRegisters(); ++i) {
+    int dst_offset = i * kDoubleSize + double_regs_offset;
+    int src_offset = i * kDoubleSize + kNumberOfRegisters * kPointerSize;
+    __ ldc1(f0, MemOperand(sp, src_offset));
+    __ sdc1(f0, MemOperand(a1, dst_offset));
   }
 
   // Remove the bailout id, eventually return address, and the saved registers
   // from the stack.
-  if (type() == EAGER || type() == OSR) {
+  if (type() == EAGER || type() == SOFT || type() == OSR) {
     __ Addu(sp, sp, Operand(kSavedRegistersAreaSize + (1 * kPointerSize)));
   } else {
     __ Addu(sp, sp, Operand(kSavedRegistersAreaSize + (2 * kPointerSize)));
@@ -716,7 +556,7 @@ void Deoptimizer::EntryGenerator::Generate() {
   {
     AllowExternalCallThatCantCauseGC scope(masm());
     __ CallCFunction(
-        ExternalReference::compute_output_frames_function(isolate), 1);
+        ExternalReference::compute_output_frames_function(isolate()), 1);
   }
   __ pop(a0);  // Restore deoptimizer object (class Deoptimizer).
 
@@ -747,15 +587,11 @@ void Deoptimizer::EntryGenerator::Generate() {
   __ bind(&outer_loop_header);
   __ Branch(&outer_push_loop, lt, t0, Operand(a1));
 
-  if (CpuFeatures::IsSupported(FPU)) {
-    CpuFeatureScope scope(masm(), FPU);
-
-    __ lw(a1, MemOperand(a0, Deoptimizer::input_offset()));
-    for (int i = 0; i < FPURegister::kMaxNumAllocatableRegisters; ++i) {
-      const FPURegister fpu_reg = FPURegister::FromAllocationIndex(i);
-      int src_offset = i * kDoubleSize + double_regs_offset;
-      __ ldc1(fpu_reg, MemOperand(a1, src_offset));
-    }
+  __ lw(a1, MemOperand(a0, Deoptimizer::input_offset()));
+  for (int i = 0; i < FPURegister::kMaxNumAllocatableRegisters; ++i) {
+    const FPURegister fpu_reg = FPURegister::FromAllocationIndex(i);
+    int src_offset = i * kDoubleSize + double_regs_offset;
+    __ ldc1(fpu_reg, MemOperand(a1, src_offset));
   }
 
   // Push state, pc, and continuation from the last output frame.
@@ -804,7 +640,7 @@ void Deoptimizer::TableEntryGenerator::GeneratePrologue() {
   for (int i = 0; i < count(); i++) {
     Label start;
     __ bind(&start);
-    if (type() != EAGER) {
+    if (type() != EAGER && type() != SOFT) {
       // Emulate ia32 like call by pushing return address to stack.
       __ addiu(sp, sp, -2 * kPointerSize);
       __ sw(ra, MemOperand(sp, 1 * kPointerSize));

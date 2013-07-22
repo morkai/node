@@ -139,6 +139,9 @@ void HeapObject::HeapObjectVerify() {
     case JS_CONTEXT_EXTENSION_OBJECT_TYPE:
       JSObject::cast(this)->JSObjectVerify();
       break;
+    case JS_GENERATOR_OBJECT_TYPE:
+      JSGeneratorObject::cast(this)->JSGeneratorObjectVerify();
+      break;
     case JS_MODULE_TYPE:
       JSModule::cast(this)->JSModuleVerify();
       break;
@@ -160,8 +163,11 @@ void HeapObject::HeapObjectVerify() {
     case JS_BUILTINS_OBJECT_TYPE:
       JSBuiltinsObject::cast(this)->JSBuiltinsObjectVerify();
       break;
-    case JS_GLOBAL_PROPERTY_CELL_TYPE:
-      JSGlobalPropertyCell::cast(this)->JSGlobalPropertyCellVerify();
+    case CELL_TYPE:
+      Cell::cast(this)->CellVerify();
+      break;
+    case PROPERTY_CELL_TYPE:
+      PropertyCell::cast(this)->PropertyCellVerify();
       break;
     case JS_ARRAY_TYPE:
       JSArray::cast(this)->JSArrayVerify();
@@ -195,6 +201,15 @@ void HeapObject::HeapObjectVerify() {
     case JS_MESSAGE_OBJECT_TYPE:
       JSMessageObject::cast(this)->JSMessageObjectVerify();
       break;
+    case JS_ARRAY_BUFFER_TYPE:
+      JSArrayBuffer::cast(this)->JSArrayBufferVerify();
+      break;
+    case JS_TYPED_ARRAY_TYPE:
+      JSTypedArray::cast(this)->JSTypedArrayVerify();
+      break;
+    case JS_DATA_VIEW_TYPE:
+      JSDataView::cast(this)->JSDataViewVerify();
+      break;
 
 #define MAKE_STRUCT_CASE(NAME, Name, name) \
   case NAME##_TYPE:                        \
@@ -220,6 +235,7 @@ void Symbol::SymbolVerify() {
   CHECK(IsSymbol());
   CHECK(HasHashCode());
   CHECK_GT(Hash(), 0);
+  CHECK(name()->IsUndefined() || name()->IsString());
 }
 
 
@@ -296,6 +312,18 @@ void JSObject::JSObjectVerify() {
     CHECK_EQ(map()->unused_property_fields(),
              (map()->inobject_properties() + properties()->length() -
               map()->NextFreePropertyIndex()));
+    DescriptorArray* descriptors = map()->instance_descriptors();
+    for (int i = 0; i < map()->NumberOfOwnDescriptors(); i++) {
+      if (descriptors->GetDetails(i).type() == FIELD) {
+        Representation r = descriptors->GetDetails(i).representation();
+        int field = descriptors->GetFieldIndex(i);
+        Object* value = RawFastPropertyAt(field);
+        if (r.IsDouble()) ASSERT(value->IsHeapNumber());
+        if (value->IsUninitialized()) continue;
+        if (r.IsSmi()) ASSERT(value->IsSmi());
+        if (r.IsHeapObject()) ASSERT(value->IsHeapObject());
+      }
+    }
   }
   CHECK_EQ((map()->has_fast_smi_or_object_elements() ||
              (elements() == GetHeap()->empty_fixed_array())),
@@ -313,10 +341,6 @@ void Map::MapVerify() {
           instance_size() < HEAP->Capacity()));
   VerifyHeapPointer(prototype());
   VerifyHeapPointer(instance_descriptors());
-  DescriptorArray* descriptors = instance_descriptors();
-  for (int i = 0; i < NumberOfOwnDescriptors(); ++i) {
-    CHECK_EQ(i, descriptors->GetDetails(i).descriptor_index() - 1);
-  }
   SLOW_ASSERT(instance_descriptors()->IsSortedNoDuplicates());
   if (HasTransitionArray()) {
     SLOW_ASSERT(transitions()->IsSortedNoDuplicates());
@@ -391,12 +415,25 @@ void FixedDoubleArray::FixedDoubleArrayVerify() {
   for (int i = 0; i < length(); i++) {
     if (!is_the_hole(i)) {
       double value = get_scalar(i);
-      CHECK(!isnan(value) ||
+      CHECK(!std::isnan(value) ||
              (BitCast<uint64_t>(value) ==
               BitCast<uint64_t>(canonical_not_the_hole_nan_as_double())) ||
              ((BitCast<uint64_t>(value) & Double::kSignMask) != 0));
     }
   }
+}
+
+
+void JSGeneratorObject::JSGeneratorObjectVerify() {
+  // In an expression like "new g()", there can be a point where a generator
+  // object is allocated but its fields are all undefined, as it hasn't yet been
+  // initialized by the generator.  Hence these weak checks.
+  VerifyObjectField(kFunctionOffset);
+  VerifyObjectField(kContextOffset);
+  VerifyObjectField(kReceiverOffset);
+  VerifyObjectField(kOperandStackOffset);
+  VerifyObjectField(kContinuationOffset);
+  VerifyObjectField(kStackHandlerIndexOffset);
 }
 
 
@@ -584,9 +621,16 @@ void Oddball::OddballVerify() {
 }
 
 
-void JSGlobalPropertyCell::JSGlobalPropertyCellVerify() {
-  CHECK(IsJSGlobalPropertyCell());
+void Cell::CellVerify() {
+  CHECK(IsCell());
   VerifyObjectField(kValueOffset);
+}
+
+
+void PropertyCell::PropertyCellVerify() {
+  CHECK(IsPropertyCell());
+  VerifyObjectField(kValueOffset);
+  VerifyObjectField(kTypeOffset);
 }
 
 
@@ -711,9 +755,56 @@ void JSFunctionProxy::JSFunctionProxyVerify() {
   VerifyPointer(construct_trap());
 }
 
+void JSArrayBuffer::JSArrayBufferVerify() {
+  CHECK(IsJSArrayBuffer());
+  JSObjectVerify();
+  VerifyPointer(byte_length());
+  CHECK(byte_length()->IsSmi() || byte_length()->IsHeapNumber()
+        || byte_length()->IsUndefined());
+}
+
+
+void JSArrayBufferView::JSArrayBufferViewVerify() {
+  CHECK(IsJSArrayBufferView());
+  JSObjectVerify();
+  VerifyPointer(buffer());
+  CHECK(buffer()->IsJSArrayBuffer() || buffer()->IsUndefined());
+
+  VerifyPointer(byte_offset());
+  CHECK(byte_offset()->IsSmi() || byte_offset()->IsHeapNumber()
+        || byte_offset()->IsUndefined());
+
+  VerifyPointer(byte_length());
+  CHECK(byte_length()->IsSmi() || byte_length()->IsHeapNumber()
+        || byte_length()->IsUndefined());
+}
+
+
+void JSTypedArray::JSTypedArrayVerify() {
+  CHECK(IsJSTypedArray());
+  JSArrayBufferViewVerify();
+  VerifyPointer(length());
+  CHECK(length()->IsSmi() || length()->IsHeapNumber()
+        || length()->IsUndefined());
+
+  VerifyPointer(elements());
+}
+
+
+void JSDataView::JSDataViewVerify() {
+  CHECK(IsJSDataView());
+  JSArrayBufferViewVerify();
+}
+
 
 void Foreign::ForeignVerify() {
   CHECK(IsForeign());
+}
+
+
+void Box::BoxVerify() {
+  CHECK(IsBox());
+  value()->Verify();
 }
 
 

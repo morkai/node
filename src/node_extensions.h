@@ -19,19 +19,20 @@
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
 // USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-
 NODE_EXT_LIST_START
 NODE_EXT_LIST_ITEM(node_buffer)
 #if HAVE_OPENSSL
 NODE_EXT_LIST_ITEM(node_crypto)
+NODE_EXT_LIST_ITEM(node_tls_wrap)
 #endif
 NODE_EXT_LIST_ITEM(node_evals)
 NODE_EXT_LIST_ITEM(node_fs)
 NODE_EXT_LIST_ITEM(node_http_parser)
 NODE_EXT_LIST_ITEM(node_os)
+NODE_EXT_LIST_ITEM(node_smalloc)
 NODE_EXT_LIST_ITEM(node_zlib)
 
-// libuv rewrite
+NODE_EXT_LIST_ITEM(node_uv)
 NODE_EXT_LIST_ITEM(node_timer_wrap)
 NODE_EXT_LIST_ITEM(node_tcp_wrap)
 NODE_EXT_LIST_ITEM(node_udp_wrap)
@@ -43,4 +44,3 @@ NODE_EXT_LIST_ITEM(node_fs_event_wrap)
 NODE_EXT_LIST_ITEM(node_signal_wrap)
 
 NODE_EXT_LIST_END
-

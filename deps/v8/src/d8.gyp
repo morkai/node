@@ -26,10 +26,13 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 {
-  'includes': ['../build/common.gypi'],
   'variables': {
+    'v8_code': 1,
     'console%': '',
+    # Enable support for Intel VTune. Supported on ia32/x64 only
+    'v8_enable_vtunejit%': 0,
   },
+  'includes': ['../build/common.gypi'],
   'targets': [
     {
       'target_name': 'd8',
@@ -68,6 +71,11 @@
             [ 'OS=="win"', {
               'sources': [ 'd8-windows.cc', ]
             }],
+          ],
+        }],
+        ['v8_enable_vtunejit==1', {
+          'dependencies': [
+            '../src/third_party/vtune/v8vtune.gyp:v8_vtune',
           ],
         }],
       ],

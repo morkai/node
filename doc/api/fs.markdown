@@ -345,6 +345,10 @@ Exclusive mode (`O_EXCL`) ensures that `path` is newly created. `fs.open()`
 fails if a file by that name already exists. On POSIX systems, symlinks are
 not followed. Exclusive mode may or may not work with network file systems.
 
+On Linux, positional writes don't work when the file is opened in append mode.
+The kernel ignores the position argument and always appends the data to
+the end of the file.
+
 ## fs.openSync(path, flags, [mode])
 
 Synchronous open(2).
@@ -386,6 +390,10 @@ specifies how many _bytes_ were written from `buffer`.
 Note that it is unsafe to use `fs.write` multiple times on the same file
 without waiting for the callback. For this scenario,
 `fs.createWriteStream` is strongly recommended.
+
+On Linux, positional writes don't work when the file is opened in append mode.
+The kernel ignores the position argument and always appends the data to
+the end of the file.
 
 ## fs.writeSync(fd, buffer, offset, length, position)
 
@@ -518,7 +526,7 @@ you need to compare `curr.mtime` and `prev.mtime`.
 
 ## fs.unwatchFile(filename, [listener])
 
-    Stability: 2 - Unstable.  Use fs.watch instead, if available.
+    Stability: 2 - Unstable.  Use fs.watch instead, if possible.
 
 Stop watching for changes on `filename`. If `listener` is specified, only that
 particular listener is removed. Otherwise, *all* listeners are removed and you
@@ -657,7 +665,6 @@ Returns a new ReadStream object (See `Readable Stream`).
       encoding: null,
       fd: null,
       mode: 0666,
-      bufferSize: 64 * 1024,
       autoClose: true
     }
 
@@ -678,7 +685,7 @@ An example to read the last 10 bytes of a file which is 100 bytes long:
 
 ## Class: fs.ReadStream
 
-`ReadStream` is a [Readable Stream](stream.html#stream_readable_stream).
+`ReadStream` is a [Readable Stream](stream.html#stream_class_stream_readable).
 
 ### Event: 'open'
 
@@ -702,9 +709,9 @@ some position past the beginning of the file.  Modifying a file rather
 than replacing it may require a `flags` mode of `r+` rather than the
 default mode `w`.
 
-## fs.WriteStream
+## Class: fs.WriteStream
 
-`WriteStream` is a [Writable Stream](stream.html#stream_writable_stream).
+`WriteStream` is a [Writable Stream](stream.html#stream_class_stream_writable).
 
 ### Event: 'open'
 

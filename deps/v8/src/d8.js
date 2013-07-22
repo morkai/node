@@ -1020,7 +1020,7 @@ DebugRequest.prototype.changeBreakpointCommandToJSONRequest_ =
           args.substring(nextPos + 1, args.length) : 'all';
       if (!arg2) {
         arg2 = 'all'; // if unspecified, set for all.
-      } if (arg2 == 'unc') { // check for short cut.
+      } else if (arg2 == 'unc') { // check for short cut.
         arg2 = 'uncaught';
       }
       excType = arg2;
@@ -2214,7 +2214,8 @@ function Stringify(x, depth) {
       return x.toString();
     case "string":
       return "\"" + x.toString() + "\"";
-    // TODO(rossberg): add symbol case
+    case "symbol":
+      return "Symbol(" + (x.name ? Stringify(x.name, depth) : "") + ")"
     case "object":
       if (x === null) return "null";
       if (x.constructor && x.constructor.name === "Array") {

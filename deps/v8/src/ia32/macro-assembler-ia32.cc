@@ -27,10 +27,11 @@
 
 #include "v8.h"
 
-#if defined(V8_TARGET_ARCH_IA32)
+#if V8_TARGET_ARCH_IA32
 
 #include "bootstrapper.h"
 #include "codegen.h"
+#include "cpu-profiler.h"
 #include "debug.h"
 #include "runtime.h"
 #include "serialize.h"
@@ -580,38 +581,21 @@ void MacroAssembler::StoreNumberToDoubleElements(
 
 void MacroAssembler::CompareMap(Register obj,
                                 Handle<Map> map,
-                                Label* early_success,
-                                CompareMapMode mode) {
+                                Label* early_success) {
   cmp(FieldOperand(obj, HeapObject::kMapOffset), map);
-  if (mode == ALLOW_ELEMENT_TRANSITION_MAPS) {
-    ElementsKind kind = map->elements_kind();
-    if (IsFastElementsKind(kind)) {
-      bool packed = IsFastPackedElementsKind(kind);
-      Map* current_map = *map;
-      while (CanTransitionToMoreGeneralFastElementsKind(kind, packed)) {
-        kind = GetNextMoreGeneralFastElementsKind(kind, packed);
-        current_map = current_map->LookupElementsTransitionMap(kind);
-        if (!current_map) break;
-        j(equal, early_success, Label::kNear);
-        cmp(FieldOperand(obj, HeapObject::kMapOffset),
-            Handle<Map>(current_map));
-      }
-    }
-  }
 }
 
 
 void MacroAssembler::CheckMap(Register obj,
                               Handle<Map> map,
                               Label* fail,
-                              SmiCheckType smi_check_type,
-                              CompareMapMode mode) {
+                              SmiCheckType smi_check_type) {
   if (smi_check_type == DO_SMI_CHECK) {
     JumpIfSmi(obj, fail);
   }
 
   Label success;
-  CompareMap(obj, map, &success, mode);
+  CompareMap(obj, map, &success);
   j(not_equal, fail);
   bind(&success);
 }
@@ -1024,69 +1008,65 @@ void MacroAssembler::ThrowUncatchable(Register value) {
 
 
 void MacroAssembler::CheckAccessGlobalProxy(Register holder_reg,
-                                            Register scratch,
+                                            Register scratch1,
+                                            Register scratch2,
                                             Label* miss) {
   Label same_contexts;
 
-  ASSERT(!holder_reg.is(scratch));
+  ASSERT(!holder_reg.is(scratch1));
+  ASSERT(!holder_reg.is(scratch2));
+  ASSERT(!scratch1.is(scratch2));
 
   // Load current lexical context from the stack frame.
-  mov(scratch, Operand(ebp, StandardFrameConstants::kContextOffset));
+  mov(scratch1, Operand(ebp, StandardFrameConstants::kContextOffset));
 
   // When generating debug code, make sure the lexical context is set.
   if (emit_debug_code()) {
-    cmp(scratch, Immediate(0));
+    cmp(scratch1, Immediate(0));
     Check(not_equal, "we should not have an empty lexical context");
   }
   // Load the native context of the current context.
   int offset =
       Context::kHeaderSize + Context::GLOBAL_OBJECT_INDEX * kPointerSize;
-  mov(scratch, FieldOperand(scratch, offset));
-  mov(scratch, FieldOperand(scratch, GlobalObject::kNativeContextOffset));
+  mov(scratch1, FieldOperand(scratch1, offset));
+  mov(scratch1, FieldOperand(scratch1, GlobalObject::kNativeContextOffset));
 
   // Check the context is a native context.
   if (emit_debug_code()) {
-    push(scratch);
     // Read the first word and compare to native_context_map.
-    mov(scratch, FieldOperand(scratch, HeapObject::kMapOffset));
-    cmp(scratch, isolate()->factory()->native_context_map());
+    cmp(FieldOperand(scratch1, HeapObject::kMapOffset),
+        isolate()->factory()->native_context_map());
     Check(equal, "JSGlobalObject::native_context should be a native context.");
-    pop(scratch);
   }
 
   // Check if both contexts are the same.
-  cmp(scratch, FieldOperand(holder_reg, JSGlobalProxy::kNativeContextOffset));
+  cmp(scratch1, FieldOperand(holder_reg, JSGlobalProxy::kNativeContextOffset));
   j(equal, &same_contexts);
 
   // Compare security tokens, save holder_reg on the stack so we can use it
   // as a temporary register.
   //
-  // TODO(119): avoid push(holder_reg)/pop(holder_reg)
-  push(holder_reg);
   // Check that the security token in the calling global object is
   // compatible with the security token in the receiving global
   // object.
-  mov(holder_reg,
+  mov(scratch2,
       FieldOperand(holder_reg, JSGlobalProxy::kNativeContextOffset));
 
   // Check the context is a native context.
   if (emit_debug_code()) {
-    cmp(holder_reg, isolate()->factory()->null_value());
+    cmp(scratch2, isolate()->factory()->null_value());
     Check(not_equal, "JSGlobalProxy::context() should not be null.");
 
-    push(holder_reg);
     // Read the first word and compare to native_context_map(),
-    mov(holder_reg, FieldOperand(holder_reg, HeapObject::kMapOffset));
-    cmp(holder_reg, isolate()->factory()->native_context_map());
+    cmp(FieldOperand(scratch2, HeapObject::kMapOffset),
+        isolate()->factory()->native_context_map());
     Check(equal, "JSGlobalObject::native_context should be a native context.");
-    pop(holder_reg);
   }
 
   int token_offset = Context::kHeaderSize +
                      Context::SECURITY_TOKEN_INDEX * kPointerSize;
-  mov(scratch, FieldOperand(scratch, token_offset));
-  cmp(scratch, FieldOperand(holder_reg, token_offset));
-  pop(holder_reg);
+  mov(scratch1, FieldOperand(scratch1, token_offset));
+  cmp(scratch1, FieldOperand(scratch2, token_offset));
   j(not_equal, miss);
 
   bind(&same_contexts);
@@ -1332,18 +1312,16 @@ void MacroAssembler::Allocate(int object_size,
 }
 
 
-void MacroAssembler::AllocateInNewSpace(
-    int header_size,
-    ScaleFactor element_size,
-    Register element_count,
-    RegisterValueType element_count_type,
-    Register result,
-    Register result_end,
-    Register scratch,
-    Label* gc_required,
-    AllocationFlags flags) {
+void MacroAssembler::Allocate(int header_size,
+                              ScaleFactor element_size,
+                              Register element_count,
+                              RegisterValueType element_count_type,
+                              Register result,
+                              Register result_end,
+                              Register scratch,
+                              Label* gc_required,
+                              AllocationFlags flags) {
   ASSERT((flags & SIZE_IN_WORDS) == 0);
-  ASSERT((flags & PRETENURE_OLD_POINTER_SPACE) == 0);
   if (!FLAG_inline_new) {
     if (emit_debug_code()) {
       // Trash the registers to simulate an allocation failure.
@@ -1365,6 +1343,7 @@ void MacroAssembler::AllocateInNewSpace(
   // Align the next allocation. Storing the filler map without checking top is
   // always safe because the limit of the heap is always aligned.
   if ((flags & DOUBLE_ALIGNMENT) != 0) {
+    ASSERT((flags & PRETENURE_OLD_POINTER_SPACE) == 0);
     ASSERT(kPointerAlignment * 2 == kDoubleAlignment);
     Label aligned;
     test(result, Immediate(kDoubleAlignmentMask));
@@ -1375,9 +1354,9 @@ void MacroAssembler::AllocateInNewSpace(
     bind(&aligned);
   }
 
-  // Calculate new top and bail out if new space is exhausted.
-  ExternalReference new_space_allocation_limit =
-      ExternalReference::new_space_allocation_limit_address(isolate());
+  // Calculate new top and bail out if space is exhausted.
+  ExternalReference allocation_limit =
+      AllocationUtils::GetAllocationLimitReference(isolate(), flags);
 
   // We assume that element_count*element_size + header_size does not
   // overflow.
@@ -1394,7 +1373,7 @@ void MacroAssembler::AllocateInNewSpace(
   lea(result_end, Operand(element_count, element_size, header_size));
   add(result_end, result);
   j(carry, gc_required);
-  cmp(result_end, Operand::StaticVariable(new_space_allocation_limit));
+  cmp(result_end, Operand::StaticVariable(allocation_limit));
   j(above, gc_required);
 
   if ((flags & TAG_OBJECT) != 0) {
@@ -1407,14 +1386,13 @@ void MacroAssembler::AllocateInNewSpace(
 }
 
 
-void MacroAssembler::AllocateInNewSpace(Register object_size,
-                                        Register result,
-                                        Register result_end,
-                                        Register scratch,
-                                        Label* gc_required,
-                                        AllocationFlags flags) {
+void MacroAssembler::Allocate(Register object_size,
+                              Register result,
+                              Register result_end,
+                              Register scratch,
+                              Label* gc_required,
+                              AllocationFlags flags) {
   ASSERT((flags & (RESULT_CONTAINS_TOP | SIZE_IN_WORDS)) == 0);
-  ASSERT((flags & PRETENURE_OLD_POINTER_SPACE) == 0);
   if (!FLAG_inline_new) {
     if (emit_debug_code()) {
       // Trash the registers to simulate an allocation failure.
@@ -1436,6 +1414,7 @@ void MacroAssembler::AllocateInNewSpace(Register object_size,
   // Align the next allocation. Storing the filler map without checking top is
   // always safe because the limit of the heap is always aligned.
   if ((flags & DOUBLE_ALIGNMENT) != 0) {
+    ASSERT((flags & PRETENURE_OLD_POINTER_SPACE) == 0);
     ASSERT(kPointerAlignment * 2 == kDoubleAlignment);
     Label aligned;
     test(result, Immediate(kDoubleAlignmentMask));
@@ -1446,15 +1425,16 @@ void MacroAssembler::AllocateInNewSpace(Register object_size,
     bind(&aligned);
   }
 
-  // Calculate new top and bail out if new space is exhausted.
-  ExternalReference new_space_allocation_limit =
-      ExternalReference::new_space_allocation_limit_address(isolate());
+  // Calculate new top and bail out if space is exhausted.
+  ExternalReference allocation_limit =
+      AllocationUtils::GetAllocationLimitReference(isolate(), flags);
+
   if (!object_size.is(result_end)) {
     mov(result_end, object_size);
   }
   add(result_end, result);
   j(carry, gc_required);
-  cmp(result_end, Operand::StaticVariable(new_space_allocation_limit));
+  cmp(result_end, Operand::StaticVariable(allocation_limit));
   j(above, gc_required);
 
   // Tag result if requested.
@@ -1511,15 +1491,15 @@ void MacroAssembler::AllocateTwoByteString(Register result,
   and_(scratch1, Immediate(~kObjectAlignmentMask));
 
   // Allocate two byte string in new space.
-  AllocateInNewSpace(SeqTwoByteString::kHeaderSize,
-                     times_1,
-                     scratch1,
-                     REGISTER_VALUE_IS_INT32,
-                     result,
-                     scratch2,
-                     scratch3,
-                     gc_required,
-                     TAG_OBJECT);
+  Allocate(SeqTwoByteString::kHeaderSize,
+           times_1,
+           scratch1,
+           REGISTER_VALUE_IS_INT32,
+           result,
+           scratch2,
+           scratch3,
+           gc_required,
+           TAG_OBJECT);
 
   // Set the map, length and hash field.
   mov(FieldOperand(result, HeapObject::kMapOffset),
@@ -1547,15 +1527,15 @@ void MacroAssembler::AllocateAsciiString(Register result,
   and_(scratch1, Immediate(~kObjectAlignmentMask));
 
   // Allocate ASCII string in new space.
-  AllocateInNewSpace(SeqOneByteString::kHeaderSize,
-                     times_1,
-                     scratch1,
-                     REGISTER_VALUE_IS_INT32,
-                     result,
-                     scratch2,
-                     scratch3,
-                     gc_required,
-                     TAG_OBJECT);
+  Allocate(SeqOneByteString::kHeaderSize,
+           times_1,
+           scratch1,
+           REGISTER_VALUE_IS_INT32,
+           result,
+           scratch2,
+           scratch3,
+           gc_required,
+           TAG_OBJECT);
 
   // Set the map, length and hash field.
   mov(FieldOperand(result, HeapObject::kMapOffset),
@@ -1607,10 +1587,32 @@ void MacroAssembler::AllocateAsciiConsString(Register result,
                                              Register scratch1,
                                              Register scratch2,
                                              Label* gc_required) {
-  // Allocate heap number in new space.
-  Allocate(ConsString::kSize, result, scratch1, scratch2, gc_required,
-           TAG_OBJECT);
+  Label allocate_new_space, install_map;
+  AllocationFlags flags = TAG_OBJECT;
 
+  ExternalReference high_promotion_mode = ExternalReference::
+      new_space_high_promotion_mode_active_address(isolate());
+
+  test(Operand::StaticVariable(high_promotion_mode), Immediate(1));
+  j(zero, &allocate_new_space);
+
+  Allocate(ConsString::kSize,
+           result,
+           scratch1,
+           scratch2,
+           gc_required,
+           static_cast<AllocationFlags>(flags | PRETENURE_OLD_POINTER_SPACE));
+  jmp(&install_map);
+
+  bind(&allocate_new_space);
+  Allocate(ConsString::kSize,
+           result,
+           scratch1,
+           scratch2,
+           gc_required,
+           flags);
+
+  bind(&install_map);
   // Set the map. The other fields are left uninitialized.
   mov(FieldOperand(result, HeapObject::kMapOffset),
       Immediate(isolate()->factory()->cons_ascii_string_map()));
@@ -1936,14 +1938,14 @@ static const bool kReturnHandlesDirectly = false;
 #endif
 
 
-Operand ApiParameterOperand(int index) {
-  return Operand(
-      esp, (index + (kReturnHandlesDirectly ? 0 : 1)) * kPointerSize);
+Operand ApiParameterOperand(int index, bool returns_handle) {
+  int offset = (index +(kReturnHandlesDirectly || !returns_handle ? 0 : 1));
+  return Operand(esp, offset * kPointerSize);
 }
 
 
-void MacroAssembler::PrepareCallApiFunction(int argc) {
-  if (kReturnHandlesDirectly) {
+void MacroAssembler::PrepareCallApiFunction(int argc, bool returns_handle) {
+  if (kReturnHandlesDirectly || !returns_handle) {
     EnterApiExitFrame(argc);
     // When handles are returned directly we don't have to allocate extra
     // space for and pass an out parameter.
@@ -1972,7 +1974,11 @@ void MacroAssembler::PrepareCallApiFunction(int argc) {
 
 
 void MacroAssembler::CallApiFunctionAndReturn(Address function_address,
-                                              int stack_space) {
+                                              Address thunk_address,
+                                              Operand thunk_last_arg,
+                                              int stack_space,
+                                              bool returns_handle,
+                                              int return_value_offset) {
   ExternalReference next_address =
       ExternalReference::handle_scope_next_address(isolate());
   ExternalReference limit_address =
@@ -1988,39 +1994,67 @@ void MacroAssembler::CallApiFunctionAndReturn(Address function_address,
   if (FLAG_log_timer_events) {
     FrameScope frame(this, StackFrame::MANUAL);
     PushSafepointRegisters();
-    PrepareCallCFunction(0, eax);
-    CallCFunction(ExternalReference::log_enter_external_function(isolate()), 0);
+    PrepareCallCFunction(1, eax);
+    mov(Operand(esp, 0),
+        Immediate(ExternalReference::isolate_address(isolate())));
+    CallCFunction(ExternalReference::log_enter_external_function(isolate()), 1);
     PopSafepointRegisters();
   }
 
+
+  Label profiler_disabled;
+  Label end_profiler_check;
+  bool* is_profiling_flag =
+      isolate()->cpu_profiler()->is_profiling_address();
+  STATIC_ASSERT(sizeof(*is_profiling_flag) == 1);
+  mov(eax, Immediate(reinterpret_cast<Address>(is_profiling_flag)));
+  cmpb(Operand(eax, 0), 0);
+  j(zero, &profiler_disabled);
+
+  // Additional parameter is the address of the actual getter function.
+  mov(thunk_last_arg, Immediate(function_address));
+  // Call the api function.
+  call(thunk_address, RelocInfo::RUNTIME_ENTRY);
+  jmp(&end_profiler_check);
+
+  bind(&profiler_disabled);
   // Call the api function.
   call(function_address, RelocInfo::RUNTIME_ENTRY);
+  bind(&end_profiler_check);
 
   if (FLAG_log_timer_events) {
     FrameScope frame(this, StackFrame::MANUAL);
     PushSafepointRegisters();
-    PrepareCallCFunction(0, eax);
-    CallCFunction(ExternalReference::log_leave_external_function(isolate()), 0);
+    PrepareCallCFunction(1, eax);
+    mov(Operand(esp, 0),
+        Immediate(ExternalReference::isolate_address(isolate())));
+    CallCFunction(ExternalReference::log_leave_external_function(isolate()), 1);
     PopSafepointRegisters();
   }
 
-  if (!kReturnHandlesDirectly) {
-    // PrepareCallApiFunction saved pointer to the output slot into
-    // callee-save register esi.
-    mov(eax, Operand(esi, 0));
-  }
-
-  Label empty_handle;
   Label prologue;
+  if (returns_handle) {
+    if (!kReturnHandlesDirectly) {
+      // PrepareCallApiFunction saved pointer to the output slot into
+      // callee-save register esi.
+      mov(eax, Operand(esi, 0));
+    }
+    Label empty_handle;
+    // Check if the result handle holds 0.
+    test(eax, eax);
+    j(zero, &empty_handle);
+    // It was non-zero.  Dereference to get the result value.
+    mov(eax, Operand(eax, 0));
+    jmp(&prologue);
+    bind(&empty_handle);
+  }
+  // Load the value from ReturnValue
+  mov(eax, Operand(ebp, return_value_offset * kPointerSize));
+
   Label promote_scheduled_exception;
   Label delete_allocated_handles;
   Label leave_exit_frame;
 
-  // Check if the result handle holds 0.
-  test(eax, eax);
-  j(zero, &empty_handle);
-  // It was non-zero.  Dereference to get the result value.
-  mov(eax, Operand(eax, 0));
   bind(&prologue);
   // No more valid handles (the result handle was the last one). Restore
   // previous handle scope.
@@ -2076,11 +2110,6 @@ void MacroAssembler::CallApiFunctionAndReturn(Address function_address,
   LeaveApiExitFrame();
   ret(stack_space * kPointerSize);
 
-  bind(&empty_handle);
-  // It was zero; the result is undefined.
-  mov(eax, isolate()->factory()->undefined_value());
-  jmp(&prologue);
-
   bind(&promote_scheduled_exception);
   TailCallRuntime(Runtime::kPromoteScheduledException, 0, 1);
 
@@ -2090,7 +2119,8 @@ void MacroAssembler::CallApiFunctionAndReturn(Address function_address,
   bind(&delete_allocated_handles);
   mov(Operand::StaticVariable(limit_address), edi);
   mov(edi, eax);
-  mov(Operand(esp, 0), Immediate(ExternalReference::isolate_address()));
+  mov(Operand(esp, 0),
+      Immediate(ExternalReference::isolate_address(isolate())));
   mov(eax, Immediate(delete_extensions));
   call(eax);
   mov(eax, edi);
@@ -2282,6 +2312,7 @@ void MacroAssembler::InvokeFunction(Register fun,
 
 
 void MacroAssembler::InvokeFunction(Handle<JSFunction> function,
+                                    const ParameterCount& expected,
                                     const ParameterCount& actual,
                                     InvokeFlag flag,
                                     const CallWrapper& call_wrapper,
@@ -2293,7 +2324,6 @@ void MacroAssembler::InvokeFunction(Handle<JSFunction> function,
   LoadHeapObject(edi, function);
   mov(esi, FieldOperand(edi, JSFunction::kContextOffset));
 
-  ParameterCount expected(function->shared()->formal_parameter_count());
   // We call indirectly through the code field in the function to
   // allow recompilation to take effect without changing any of the
   // call sites.
@@ -2484,21 +2514,32 @@ int MacroAssembler::SafepointRegisterStackIndex(int reg_code) {
 
 void MacroAssembler::LoadHeapObject(Register result,
                                     Handle<HeapObject> object) {
+  AllowDeferredHandleDereference embedding_raw_address;
   if (isolate()->heap()->InNewSpace(*object)) {
-    Handle<JSGlobalPropertyCell> cell =
-        isolate()->factory()->NewJSGlobalPropertyCell(object);
-    mov(result, Operand::Cell(cell));
+    Handle<Cell> cell = isolate()->factory()->NewCell(object);
+    mov(result, Operand::ForCell(cell));
   } else {
     mov(result, object);
   }
 }
 
 
-void MacroAssembler::PushHeapObject(Handle<HeapObject> object) {
+void MacroAssembler::CmpHeapObject(Register reg, Handle<HeapObject> object) {
+  AllowDeferredHandleDereference using_raw_address;
   if (isolate()->heap()->InNewSpace(*object)) {
-    Handle<JSGlobalPropertyCell> cell =
-        isolate()->factory()->NewJSGlobalPropertyCell(object);
-    push(Operand::Cell(cell));
+    Handle<Cell> cell = isolate()->factory()->NewCell(object);
+    cmp(reg, Operand::ForCell(cell));
+  } else {
+    cmp(reg, object);
+  }
+}
+
+
+void MacroAssembler::PushHeapObject(Handle<HeapObject> object) {
+  AllowDeferredHandleDereference using_raw_address;
+  if (isolate()->heap()->InNewSpace(*object)) {
+    Handle<Cell> cell = isolate()->factory()->NewCell(object);
+    push(Operand::ForCell(cell));
   } else {
     Push(object);
   }
@@ -2519,6 +2560,25 @@ void MacroAssembler::Ret(int bytes_dropped, Register scratch) {
     push(scratch);
     ret(0);
   }
+}
+
+
+void MacroAssembler::VerifyX87StackDepth(uint32_t depth) {
+  // Make sure the floating point stack is either empty or has depth items.
+  ASSERT(depth <= 7);
+
+  // The top-of-stack (tos) is 7 if there is one item pushed.
+  int tos = (8 - depth) % 8;
+  const int kTopMask = 0x3800;
+  push(eax);
+  fwait();
+  fnstsw_ax();
+  and_(eax, kTopMask);
+  shr(eax, 11);
+  cmp(eax, Immediate(tos));
+  Check(equal, "Unexpected FPU stack depth after instruction");
+  fnclex();
+  pop(eax);
 }
 
 
@@ -2748,6 +2808,17 @@ void MacroAssembler::JumpIfNotBothSequentialAsciiStrings(Register object1,
 }
 
 
+void MacroAssembler::JumpIfNotUniqueName(Operand operand,
+                                         Label* not_unique_name,
+                                         Label::Distance distance) {
+  STATIC_ASSERT(((SYMBOL_TYPE - 1) & kIsInternalizedMask) == kInternalizedTag);
+  cmp(operand, Immediate(kInternalizedTag));
+  j(less, not_unique_name, distance);
+  cmp(operand, Immediate(SYMBOL_TYPE));
+  j(greater, not_unique_name, distance);
+}
+
+
 void MacroAssembler::PrepareCallCFunction(int num_arguments, Register scratch) {
   int frame_alignment = OS::ActivationFrameAlignment();
   if (frame_alignment != 0) {
@@ -2867,6 +2938,18 @@ void MacroAssembler::CheckPageFlagForMap(
 }
 
 
+void MacroAssembler::CheckMapDeprecated(Handle<Map> map,
+                                        Register scratch,
+                                        Label* if_deprecated) {
+  if (map->CanBeDeprecated()) {
+    mov(scratch, map);
+    mov(scratch, FieldOperand(scratch, Map::kBitField3Offset));
+    and_(scratch, Immediate(Smi::FromInt(Map::Deprecated::kMask)));
+    j(not_zero, if_deprecated);
+  }
+}
+
+
 void MacroAssembler::JumpIfBlack(Register object,
                                  Register scratch0,
                                  Register scratch1,
@@ -2973,7 +3056,7 @@ void MacroAssembler::EnsureNotWhite(
 
   // Check for heap-number
   mov(map, FieldOperand(value, HeapObject::kMapOffset));
-  cmp(map, FACTORY->heap_number_map());
+  cmp(map, isolate()->factory()->heap_number_map());
   j(not_equal, &not_heap_number, Label::kNear);
   mov(length, Immediate(HeapNumber::kSize));
   jmp(&is_data_object, Label::kNear);

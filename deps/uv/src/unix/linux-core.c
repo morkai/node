@@ -36,7 +36,10 @@
 #include <fcntl.h>
 #include <time.h>
 
+#ifndef __ANDROID__
 #define HAVE_IFADDRS_H 1
+#endif
+
 #ifdef __UCLIBC__
 # if __UCLIBC_MAJOR__ < 0 || __UCLIBC_MINOR__ < 9 || __UCLIBC_SUBLEVEL__ < 32
 #  undef HAVE_IFADDRS_H
@@ -83,7 +86,7 @@ int uv__platform_loop_init(uv_loop_t* loop, int default_loop) {
   loop->inotify_watchers = NULL;
 
   if (fd == -1)
-    return -1;
+    return -errno;
 
   return 0;
 }
@@ -260,12 +263,13 @@ void uv_loadavg(double avg[3]) {
 int uv_exepath(char* buffer, size_t* size) {
   ssize_t n;
 
-  if (!buffer || !size) {
-    return -1;
-  }
+  if (buffer == NULL || size == NULL)
+    return -EINVAL;
 
   n = readlink("/proc/self/exe", buffer, *size - 1);
-  if (n <= 0) return -1;
+  if (n == -1)
+    return -errno;
+
   buffer[n] = '\0';
   *size = n;
 
@@ -283,103 +287,64 @@ uint64_t uv_get_total_memory(void) {
 }
 
 
-uv_err_t uv_resident_set_memory(size_t* rss) {
-  FILE* f;
-  int itmp;
-  char ctmp;
-  unsigned int utmp;
-  size_t page_size = getpagesize();
-  char *cbuf;
-  int foundExeEnd;
-  char buf[PATH_MAX + 1];
+int uv_resident_set_memory(size_t* rss) {
+  char buf[1024];
+  const char* s;
+  ssize_t n;
+  long val;
+  int fd;
+  int i;
 
-  f = fopen("/proc/self/stat", "r");
-  if (!f) return uv__new_sys_error(errno);
+  do
+    fd = open("/proc/self/stat", O_RDONLY);
+  while (fd == -1 && errno == EINTR);
 
-  /* PID */
-  if (fscanf(f, "%d ", &itmp) == 0) goto error; /* coverity[secure_coding] */
-  /* Exec file */
-  cbuf = buf;
-  foundExeEnd = 0;
-  if (fscanf (f, "%c", cbuf++) == 0) goto error;
-  while (1) {
-    if (fscanf(f, "%c", cbuf) == 0) goto error;
-    if (*cbuf == ')') {
-      foundExeEnd = 1;
-    } else if (foundExeEnd && *cbuf == ' ') {
-      *cbuf = 0;
-      break;
-    }
+  if (fd == -1)
+    return -errno;
 
-    cbuf++;
+  do
+    n = read(fd, buf, sizeof(buf) - 1);
+  while (n == -1 && errno == EINTR);
+
+  SAVE_ERRNO(close(fd));
+  if (n == -1)
+    return -errno;
+  buf[n] = '\0';
+
+  s = strchr(buf, ' ');
+  if (s == NULL)
+    goto err;
+
+  s += 1;
+  if (*s != '(')
+    goto err;
+
+  s = strchr(s, ')');
+  if (s == NULL)
+    goto err;
+
+  for (i = 1; i <= 22; i++) {
+    s = strchr(s + 1, ' ');
+    if (s == NULL)
+      goto err;
   }
-  /* State */
-  if (fscanf (f, "%c ", &ctmp) == 0) goto error; /* coverity[secure_coding] */
-  /* Parent process */
-  if (fscanf (f, "%d ", &itmp) == 0) goto error; /* coverity[secure_coding] */
-  /* Process group */
-  if (fscanf (f, "%d ", &itmp) == 0) goto error; /* coverity[secure_coding] */
-  /* Session id */
-  if (fscanf (f, "%d ", &itmp) == 0) goto error; /* coverity[secure_coding] */
-  /* TTY */
-  if (fscanf (f, "%d ", &itmp) == 0) goto error; /* coverity[secure_coding] */
-  /* TTY owner process group */
-  if (fscanf (f, "%d ", &itmp) == 0) goto error; /* coverity[secure_coding] */
-  /* Flags */
-  if (fscanf (f, "%u ", &utmp) == 0) goto error; /* coverity[secure_coding] */
-  /* Minor faults (no memory page) */
-  if (fscanf (f, "%u ", &utmp) == 0) goto error; /* coverity[secure_coding] */
-  /* Minor faults, children */
-  if (fscanf (f, "%u ", &utmp) == 0) goto error; /* coverity[secure_coding] */
-  /* Major faults (memory page faults) */
-  if (fscanf (f, "%u ", &utmp) == 0) goto error; /* coverity[secure_coding] */
-  /* Major faults, children */
-  if (fscanf (f, "%u ", &utmp) == 0) goto error; /* coverity[secure_coding] */
-  /* utime */
-  if (fscanf (f, "%d ", &itmp) == 0) goto error; /* coverity[secure_coding] */
-  /* stime */
-  if (fscanf (f, "%d ", &itmp) == 0) goto error; /* coverity[secure_coding] */
-  /* utime, children */
-  if (fscanf (f, "%d ", &itmp) == 0) goto error; /* coverity[secure_coding] */
-  /* stime, children */
-  if (fscanf (f, "%d ", &itmp) == 0) goto error; /* coverity[secure_coding] */
-  /* jiffies remaining in current time slice */
-  if (fscanf (f, "%d ", &itmp) == 0) goto error; /* coverity[secure_coding] */
-  /* 'nice' value */
-  if (fscanf (f, "%d ", &itmp) == 0) goto error; /* coverity[secure_coding] */
-  /* jiffies until next timeout */
-  if (fscanf (f, "%u ", &utmp) == 0) goto error; /* coverity[secure_coding] */
-  /* jiffies until next SIGALRM */
-  if (fscanf (f, "%u ", &utmp) == 0) goto error; /* coverity[secure_coding] */
-  /* start time (jiffies since system boot) */
-  if (fscanf (f, "%d ", &itmp) == 0) goto error; /* coverity[secure_coding] */
 
-  /* Virtual memory size */
-  if (fscanf (f, "%u ", &utmp) == 0) goto error; /* coverity[secure_coding] */
+  errno = 0;
+  val = strtol(s, NULL, 10);
+  if (errno != 0)
+    goto err;
+  if (val < 0)
+    goto err;
 
-  /* Resident set size */
-  if (fscanf (f, "%u ", &utmp) == 0) goto error; /* coverity[secure_coding] */
-  *rss = (size_t) utmp * page_size;
+  *rss = val * getpagesize();
+  return 0;
 
-  /* rlim */
-  if (fscanf (f, "%u ", &utmp) == 0) goto error; /* coverity[secure_coding] */
-  /* Start of text */
-  if (fscanf (f, "%u ", &utmp) == 0) goto error; /* coverity[secure_coding] */
-  /* End of text */
-  if (fscanf (f, "%u ", &utmp) == 0) goto error; /* coverity[secure_coding] */
-  /* Start of stack */
-  if (fscanf (f, "%u ", &utmp) == 0) goto error; /* coverity[secure_coding] */
-
-  fclose (f);
-  return uv_ok_;
-
-error:
-  fclose (f);
-  return uv__new_sys_error(errno);
+err:
+  return -EINVAL;
 }
 
 
-uv_err_t uv_uptime(double* uptime) {
+int uv_uptime(double* uptime) {
   static volatile int no_clock_boottime;
   struct timespec now;
   int r;
@@ -397,17 +362,18 @@ uv_err_t uv_uptime(double* uptime) {
   }
 
   if (r)
-    return uv__new_sys_error(errno);
+    return -errno;
 
   *uptime = now.tv_sec;
   *uptime += (double)now.tv_nsec / 1000000000.0;
-  return uv_ok_;
+  return 0;
 }
 
 
-uv_err_t uv_cpu_info(uv_cpu_info_t** cpu_infos, int* count) {
+int uv_cpu_info(uv_cpu_info_t** cpu_infos, int* count) {
   unsigned int numcpus;
   uv_cpu_info_t* ci;
+  int err;
 
   *cpu_infos = NULL;
   *count = 0;
@@ -418,16 +384,15 @@ uv_err_t uv_cpu_info(uv_cpu_info_t** cpu_infos, int* count) {
 
   ci = calloc(numcpus, sizeof(*ci));
   if (ci == NULL)
-    return uv__new_sys_error(ENOMEM);
+    return -ENOMEM;
 
-  if (read_models(numcpus, ci)) {
-    SAVE_ERRNO(free(ci));
-    return uv__new_sys_error(errno);
-  }
+  err = read_models(numcpus, ci);
+  if (err == 0)
+    err = read_times(numcpus, ci);
 
-  if (read_times(numcpus, ci)) {
-    SAVE_ERRNO(free(ci));
-    return uv__new_sys_error(errno);
+  if (err) {
+    uv_free_cpu_info(ci, numcpus);
+    return err;
   }
 
   /* read_models() on x86 also reads the CPU speed from /proc/cpuinfo.
@@ -439,7 +404,7 @@ uv_err_t uv_cpu_info(uv_cpu_info_t** cpu_infos, int* count) {
   *cpu_infos = ci;
   *count = numcpus;
 
-  return uv_ok_;
+  return 0;
 }
 
 
@@ -453,76 +418,96 @@ static void read_speeds(unsigned int numcpus, uv_cpu_info_t* ci) {
 
 /* Also reads the CPU frequency on x86. The other architectures only have
  * a BogoMIPS field, which may not be very accurate.
+ *
+ * Note: Simply returns on error, uv_cpu_info() takes care of the cleanup.
  */
 static int read_models(unsigned int numcpus, uv_cpu_info_t* ci) {
-#if defined(__i386__) || defined(__x86_64__)
   static const char model_marker[] = "model name\t: ";
   static const char speed_marker[] = "cpu MHz\t\t: ";
-#elif defined(__arm__)
-  static const char model_marker[] = "Processor\t: ";
-  static const char speed_marker[] = "";
-#elif defined(__mips__)
-  static const char model_marker[] = "cpu model\t\t: ";
-  static const char speed_marker[] = "";
-#else
-# warning uv_cpu_info() is not supported on this architecture.
-  static const char model_marker[] = "";
-  static const char speed_marker[] = "";
-#endif
-  static const char bogus_model[] = "unknown";
+  const char* inferred_model;
   unsigned int model_idx;
   unsigned int speed_idx;
   char buf[1024];
   char* model;
   FILE* fp;
-  char* inferred_model;
 
-  fp = fopen("/proc/cpuinfo", "r");
-  if (fp == NULL)
-    return -1;
+  /* Most are unused on non-ARM, non-MIPS and non-x86 architectures. */
+  (void) &model_marker;
+  (void) &speed_marker;
+  (void) &speed_idx;
+  (void) &model;
+  (void) &buf;
+  (void) &fp;
 
   model_idx = 0;
   speed_idx = 0;
 
+#if defined(__arm__) || \
+    defined(__i386__) || \
+    defined(__mips__) || \
+    defined(__x86_64__)
+  fp = fopen("/proc/cpuinfo", "r");
+  if (fp == NULL)
+    return -errno;
+
   while (fgets(buf, sizeof(buf), fp)) {
-    if (model_marker[0] != '\0' &&
-        model_idx < numcpus &&
-        strncmp(buf, model_marker, sizeof(model_marker) - 1) == 0)
-    {
-      model = buf + sizeof(model_marker) - 1;
-      model = strndup(model, strlen(model) - 1); /* strip newline */
-      ci[model_idx++].model = model;
-      continue;
+    if (model_idx < numcpus) {
+      if (strncmp(buf, model_marker, sizeof(model_marker) - 1) == 0) {
+        model = buf + sizeof(model_marker) - 1;
+        model = strndup(model, strlen(model) - 1);  /* Strip newline. */
+        if (model == NULL) {
+          fclose(fp);
+          return -ENOMEM;
+        }
+        ci[model_idx++].model = model;
+        continue;
+      }
     }
-
-    if (speed_marker[0] != '\0' &&
-        speed_idx < numcpus &&
-        strncmp(buf, speed_marker, sizeof(speed_marker) - 1) == 0)
-    {
-      ci[speed_idx++].speed = atoi(buf + sizeof(speed_marker) - 1);
-      continue;
+#if defined(__arm__) || defined(__mips__)
+    if (model_idx < numcpus) {
+#if defined(__arm__)
+      /* Fallback for pre-3.8 kernels. */
+      static const char model_marker[] = "Processor\t: ";
+#else	/* defined(__mips__) */
+      static const char model_marker[] = "cpu model\t\t: ";
+#endif
+      if (strncmp(buf, model_marker, sizeof(model_marker) - 1) == 0) {
+        model = buf + sizeof(model_marker) - 1;
+        model = strndup(model, strlen(model) - 1);  /* Strip newline. */
+        if (model == NULL) {
+          fclose(fp);
+          return -ENOMEM;
+        }
+        ci[model_idx++].model = model;
+        continue;
+      }
     }
+#else  /* !__arm__ && !__mips__ */
+    if (speed_idx < numcpus) {
+      if (strncmp(buf, speed_marker, sizeof(speed_marker) - 1) == 0) {
+        ci[speed_idx++].speed = atoi(buf + sizeof(speed_marker) - 1);
+        continue;
+      }
+    }
+#endif  /* __arm__ || __mips__ */
   }
+
   fclose(fp);
+#endif  /* __arm__ || __i386__ || __mips__ || __x86_64__ */
 
-  /* Now we want to make sure that all the models contain *something*:
-   * it's not safe to leave them as null.
+  /* Now we want to make sure that all the models contain *something* because
+   * it's not safe to leave them as null. Copy the last entry unless there
+   * isn't one, in that case we simply put "unknown" into everything.
    */
-  if (model_idx == 0) {
-    /* No models at all: fake up the first one. */
-    ci[0].model = strndup(bogus_model, sizeof(bogus_model) - 1);
-    model_idx = 1;
-  }
-
-  /* Not enough models, but we do have at least one.  So we'll just
-   * copy the rest down: it might be better to indicate somehow that
-   * the remaining ones have been guessed.
-   */
-  inferred_model = ci[model_idx - 1].model;
+  inferred_model = "unknown";
+  if (model_idx > 0)
+    inferred_model = ci[model_idx - 1].model;
 
   while (model_idx < numcpus) {
-    ci[model_idx].model = strndup(inferred_model, strlen(inferred_model));
-    model_idx++;
+    model = strndup(inferred_model, strlen(inferred_model));
+    if (model == NULL)
+      return -ENOMEM;
+    ci[model_idx++].model = model;
   }
 
   return 0;
@@ -549,7 +534,7 @@ static int read_times(unsigned int numcpus, uv_cpu_info_t* ci) {
 
   fp = fopen("/proc/stat", "r");
   if (fp == NULL)
-    return -1;
+    return -errno;
 
   if (!fgets(buf, sizeof(buf), fp))
     abort();
@@ -633,18 +618,17 @@ void uv_free_cpu_info(uv_cpu_info_t* cpu_infos, int count) {
 }
 
 
-uv_err_t uv_interface_addresses(uv_interface_address_t** addresses,
+int uv_interface_addresses(uv_interface_address_t** addresses,
   int* count) {
 #ifndef HAVE_IFADDRS_H
-  return uv__new_artificial_error(UV_ENOSYS);
+  return -ENOSYS;
 #else
   struct ifaddrs *addrs, *ent;
   char ip[INET6_ADDRSTRLEN];
   uv_interface_address_t* address;
 
-  if (getifaddrs(&addrs) != 0) {
-    return uv__new_sys_error(errno);
-  }
+  if (getifaddrs(&addrs))
+    return -errno;
 
   *count = 0;
 
@@ -659,11 +643,9 @@ uv_err_t uv_interface_addresses(uv_interface_address_t** addresses,
     (*count)++;
   }
 
-  *addresses = (uv_interface_address_t*)
-    malloc(*count * sizeof(uv_interface_address_t));
-  if (!(*addresses)) {
-    return uv__new_artificial_error(UV_ENOMEM);
-  }
+  *addresses = malloc(*count * sizeof(**addresses));
+  if (!(*addresses))
+    return -ENOMEM;
 
   address = *addresses;
 
@@ -688,9 +670,15 @@ uv_err_t uv_interface_addresses(uv_interface_address_t** addresses,
     address->name = strdup(ent->ifa_name);
 
     if (ent->ifa_addr->sa_family == AF_INET6) {
-      address->address.address6 = *((struct sockaddr_in6 *)ent->ifa_addr);
+      address->address.address6 = *((struct sockaddr_in6*) ent->ifa_addr);
     } else {
-      address->address.address4 = *((struct sockaddr_in *)ent->ifa_addr);
+      address->address.address4 = *((struct sockaddr_in*) ent->ifa_addr);
+    }
+
+    if (ent->ifa_netmask->sa_family == AF_INET6) {
+      address->netmask.netmask6 = *((struct sockaddr_in6*) ent->ifa_netmask);
+    } else {
+      address->netmask.netmask4 = *((struct sockaddr_in*) ent->ifa_netmask);
     }
 
     address->is_internal = ent->ifa_flags & IFF_LOOPBACK ? 1 : 0;
@@ -700,7 +688,7 @@ uv_err_t uv_interface_addresses(uv_interface_address_t** addresses,
 
   freeifaddrs(addrs);
 
-  return uv_ok_;
+  return 0;
 #endif
 }
 

@@ -27,7 +27,7 @@
 
 #include "v8.h"
 
-#if defined(V8_TARGET_ARCH_X64)
+#if V8_TARGET_ARCH_X64
 
 #include "codegen.h"
 #include "macro-assembler.h"
@@ -346,8 +346,8 @@ void ElementsTransitionGenerator::GenerateSmiToDouble(
 
   // Allocate new backing store.
   __ bind(&new_backing_store);
-  __ lea(rdi, Operand(r9, times_pointer_size, FixedArray::kHeaderSize));
-  __ AllocateInNewSpace(rdi, r14, r11, r15, fail, TAG_OBJECT);
+  __ lea(rdi, Operand(r9, times_8, FixedArray::kHeaderSize));
+  __ Allocate(rdi, r14, r11, r15, fail, TAG_OBJECT);
   // Set backing store's map
   __ LoadRoot(rdi, Heap::kFixedDoubleArrayMapRootIndex);
   __ movq(FieldOperand(r14, HeapObject::kMapOffset), rdi);
@@ -381,7 +381,7 @@ void ElementsTransitionGenerator::GenerateSmiToDouble(
   // Conversion loop.
   __ bind(&loop);
   __ movq(rbx,
-          FieldOperand(r8, r9, times_8, FixedArray::kHeaderSize));
+          FieldOperand(r8, r9, times_pointer_size, FixedArray::kHeaderSize));
   // r9 : current element's index
   // rbx: current element (smi-tagged)
   __ JumpIfNotSmi(rbx, &convert_hole);
@@ -435,7 +435,7 @@ void ElementsTransitionGenerator::GenerateDoubleToObject(
   // r8 : source FixedDoubleArray
   // r9 : number of elements
   __ lea(rdi, Operand(r9, times_pointer_size, FixedArray::kHeaderSize));
-  __ AllocateInNewSpace(rdi, r11, r14, r15, &gc_required, TAG_OBJECT);
+  __ Allocate(rdi, r11, r14, r15, &gc_required, TAG_OBJECT);
   // r11: destination FixedArray
   __ LoadRoot(rdi, Heap::kFixedArrayMapRootIndex);
   __ movq(FieldOperand(r11, HeapObject::kMapOffset), rdi);
@@ -459,7 +459,7 @@ void ElementsTransitionGenerator::GenerateDoubleToObject(
   __ bind(&loop);
   __ movq(r14, FieldOperand(r8,
                             r9,
-                            times_pointer_size,
+                            times_8,
                             FixedDoubleArray::kHeaderSize));
   // r9 : current element's index
   // r14: current element
@@ -624,46 +624,6 @@ void StringCharLoadGenerator::Generate(MacroAssembler* masm,
 }
 
 
-void SeqStringSetCharGenerator::Generate(MacroAssembler* masm,
-                                         String::Encoding encoding,
-                                         Register string,
-                                         Register index,
-                                         Register value) {
-  if (FLAG_debug_code) {
-    __ Check(masm->CheckSmi(index), "Non-smi index");
-    __ Check(masm->CheckSmi(value), "Non-smi value");
-
-    __ SmiCompare(index, FieldOperand(string, String::kLengthOffset));
-    __ Check(less, "Index is too large");
-
-    __ SmiCompare(index, Smi::FromInt(0));
-    __ Check(greater_equal, "Index is negative");
-
-    __ push(value);
-    __ movq(value, FieldOperand(string, HeapObject::kMapOffset));
-    __ movzxbq(value, FieldOperand(value, Map::kInstanceTypeOffset));
-
-    __ andb(value, Immediate(kStringRepresentationMask | kStringEncodingMask));
-    static const uint32_t one_byte_seq_type = kSeqStringTag | kOneByteStringTag;
-    static const uint32_t two_byte_seq_type = kSeqStringTag | kTwoByteStringTag;
-    __ cmpq(value, Immediate(encoding == String::ONE_BYTE_ENCODING
-                                 ? one_byte_seq_type : two_byte_seq_type));
-    __ Check(equal, "Unexpected string type");
-    __ pop(value);
-  }
-
-  __ SmiToInteger32(value, value);
-  __ SmiToInteger32(index, index);
-  if (encoding == String::ONE_BYTE_ENCODING) {
-    __ movb(FieldOperand(string, index, times_1, SeqString::kHeaderSize),
-            value);
-  } else {
-    __ movw(FieldOperand(string, index, times_2, SeqString::kHeaderSize),
-            value);
-  }
-}
-
-
 void MathExpGenerator::EmitMathExp(MacroAssembler* masm,
                                    XMMRegister input,
                                    XMMRegister result,
@@ -769,13 +729,17 @@ void Code::PatchPlatformCodeAge(byte* sequence,
   uint32_t young_length;
   byte* young_sequence = GetNoCodeAgeSequence(&young_length);
   if (age == kNoAge) {
-    memcpy(sequence, young_sequence, young_length);
+    CopyBytes(sequence, young_sequence, young_length);
     CPU::FlushICache(sequence, young_length);
   } else {
     Code* stub = GetCodeAgeStub(age, parity);
     CodePatcher patcher(sequence, young_length);
     patcher.masm()->call(stub->instruction_start());
-    patcher.masm()->nop();
+    for (int i = 0;
+         i < kNoCodeAgeSequenceLength - Assembler::kShortCallInstructionLength;
+         i++) {
+      patcher.masm()->nop();
+    }
   }
 }
 

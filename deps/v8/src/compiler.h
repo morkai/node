@@ -47,16 +47,18 @@ enum ParseRestriction {
   ONLY_SINGLE_FUNCTION_LITERAL  // Only a single FunctionLiteral expression.
 };
 
+struct OffsetRange {
+  OffsetRange(int from, int to) : from(from), to(to) {}
+  int from;
+  int to;
+};
+
 // CompilationInfo encapsulates some information known at compile time.  It
 // is constructed based on the resources available at compile-time.
 class CompilationInfo {
  public:
-  CompilationInfo(Handle<Script> script, Zone* zone);
-  CompilationInfo(Handle<SharedFunctionInfo> shared_info, Zone* zone);
   CompilationInfo(Handle<JSFunction> closure, Zone* zone);
-  CompilationInfo(HydrogenCodeStub* stub, Isolate* isolate, Zone* zone);
-
-  ~CompilationInfo();
+  virtual ~CompilationInfo();
 
   Isolate* isolate() {
     ASSERT(Isolate::Current() == isolate_);
@@ -79,7 +81,7 @@ class CompilationInfo {
   Handle<JSFunction> closure() const { return closure_; }
   Handle<SharedFunctionInfo> shared_info() const { return shared_info_; }
   Handle<Script> script() const { return script_; }
-  HydrogenCodeStub* code_stub() {return code_stub_; }
+  HydrogenCodeStub* code_stub() const {return code_stub_; }
   v8::Extension* extension() const { return extension_; }
   ScriptDataImpl* pre_parse_data() const { return pre_parse_data_; }
   Handle<Context> context() const { return context_; }
@@ -141,6 +143,14 @@ class CompilationInfo {
 
   bool saves_caller_doubles() const {
     return SavesCallerDoubles::decode(flags_);
+  }
+
+  void MarkAsRequiresFrame() {
+    flags_ |= RequiresFrame::encode(true);
+  }
+
+  bool requires_frame() const {
+    return RequiresFrame::decode(flags_);
   }
 
   void SetParseRestriction(ParseRestriction restriction) {
@@ -229,6 +239,18 @@ class CompilationInfo {
     deferred_handles_ = deferred_handles;
   }
 
+  ZoneList<Handle<HeapObject> >* dependencies(
+      DependentCode::DependencyGroup group) {
+    if (dependencies_[group] == NULL) {
+      dependencies_[group] = new(zone_) ZoneList<Handle<HeapObject> >(2, zone_);
+    }
+    return dependencies_[group];
+  }
+
+  void CommitDependencies(Handle<Code> code);
+
+  void RollbackDependencies();
+
   void SaveHandles() {
     SaveHandle(&closure_);
     SaveHandle(&shared_info_);
@@ -249,6 +271,44 @@ class CompilationInfo {
     prologue_offset_ = prologue_offset;
   }
 
+  // Adds offset range [from, to) where fp register does not point
+  // to the current frame base. Used in CPU profiler to detect stack
+  // samples where top frame is not set up.
+  inline void AddNoFrameRange(int from, int to) {
+    if (no_frame_ranges_) no_frame_ranges_->Add(OffsetRange(from, to));
+  }
+
+  List<OffsetRange>* ReleaseNoFrameRanges() {
+    List<OffsetRange>* result = no_frame_ranges_;
+    no_frame_ranges_ = NULL;
+    return result;
+  }
+
+  Handle<Foreign> object_wrapper() {
+    if (object_wrapper_.is_null()) {
+      object_wrapper_ =
+          isolate()->factory()->NewForeign(reinterpret_cast<Address>(this));
+    }
+    return object_wrapper_;
+  }
+
+  void AbortDueToDependencyChange() {
+    mode_ = DEPENDENCY_CHANGE_ABORT;
+  }
+
+  bool HasAbortedDueToDependencyChange() {
+    return mode_ == DEPENDENCY_CHANGE_ABORT;
+  }
+
+ protected:
+  CompilationInfo(Handle<Script> script,
+                  Zone* zone);
+  CompilationInfo(Handle<SharedFunctionInfo> shared_info,
+                  Zone* zone);
+  CompilationInfo(HydrogenCodeStub* stub,
+                  Isolate* isolate,
+                  Zone* zone);
+
  private:
   Isolate* isolate_;
 
@@ -261,7 +321,8 @@ class CompilationInfo {
     BASE,
     OPTIMIZE,
     NONOPT,
-    STUB
+    STUB,
+    DEPENDENCY_CHANGE_ABORT
   };
 
   void Initialize(Isolate* isolate, Mode mode, Zone* zone);
@@ -300,6 +361,8 @@ class CompilationInfo {
   class SavesCallerDoubles: public BitField<bool, 12, 1> {};
   // If the set of valid statements is restricted.
   class ParseRestricitonField: public BitField<ParseRestriction, 13, 1> {};
+  // If the function requires a frame (for unspecified reasons)
+  class RequiresFrame: public BitField<bool, 14, 1> {};
 
   unsigned flags_;
 
@@ -339,6 +402,8 @@ class CompilationInfo {
 
   DeferredHandles* deferred_handles_;
 
+  ZoneList<Handle<HeapObject> >* dependencies_[DependentCode::kGroupCount];
+
   template<typename T>
   void SaveHandle(Handle<T> *object) {
     if (!object->is_null()) {
@@ -351,9 +416,13 @@ class CompilationInfo {
 
   int prologue_offset_;
 
+  List<OffsetRange>* no_frame_ranges_;
+
   // A copy of shared_info()->opt_count() to avoid handle deref
   // during graph optimization.
   int opt_count_;
+
+  Handle<Foreign> object_wrapper_;
 
   DISALLOW_COPY_AND_ASSIGN(CompilationInfo);
 };
@@ -365,24 +434,26 @@ class CompilationInfoWithZone: public CompilationInfo {
  public:
   explicit CompilationInfoWithZone(Handle<Script> script)
       : CompilationInfo(script, &zone_),
-        zone_(script->GetIsolate()),
-        zone_scope_(&zone_, DELETE_ON_EXIT) {}
+        zone_(script->GetIsolate()) {}
   explicit CompilationInfoWithZone(Handle<SharedFunctionInfo> shared_info)
       : CompilationInfo(shared_info, &zone_),
-        zone_(shared_info->GetIsolate()),
-        zone_scope_(&zone_, DELETE_ON_EXIT) {}
+        zone_(shared_info->GetIsolate()) {}
   explicit CompilationInfoWithZone(Handle<JSFunction> closure)
       : CompilationInfo(closure, &zone_),
-        zone_(closure->GetIsolate()),
-        zone_scope_(&zone_, DELETE_ON_EXIT) {}
-  explicit CompilationInfoWithZone(HydrogenCodeStub* stub, Isolate* isolate)
+        zone_(closure->GetIsolate()) {}
+  CompilationInfoWithZone(HydrogenCodeStub* stub, Isolate* isolate)
       : CompilationInfo(stub, isolate, &zone_),
-        zone_(isolate),
-        zone_scope_(&zone_, DELETE_ON_EXIT) {}
+        zone_(isolate) {}
+
+  // Virtual destructor because a CompilationInfoWithZone has to exit the
+  // zone scope and get rid of dependent maps even when the destructor is
+  // called when cast as a CompilationInfo.
+  virtual ~CompilationInfoWithZone() {
+    RollbackDependencies();
+  }
 
  private:
   Zone zone_;
-  ZoneScope zone_scope_;
 };
 
 
@@ -417,7 +488,6 @@ class OptimizingCompiler: public ZoneObject {
  public:
   explicit OptimizingCompiler(CompilationInfo* info)
       : info_(info),
-        oracle_(NULL),
         graph_builder_(NULL),
         graph_(NULL),
         chunk_(NULL),
@@ -446,7 +516,6 @@ class OptimizingCompiler: public ZoneObject {
 
  private:
   CompilationInfo* info_;
-  TypeFeedbackOracle* oracle_;
   HOptimizedGraphBuilder* graph_builder_;
   HGraph* graph_;
   LChunk* chunk_;
@@ -545,6 +614,30 @@ class Compiler : public AllStatic {
   static void RecordFunctionCompilation(Logger::LogEventsAndTags tag,
                                         CompilationInfo* info,
                                         Handle<SharedFunctionInfo> shared);
+};
+
+
+class CompilationPhase BASE_EMBEDDED {
+ public:
+  CompilationPhase(const char* name, CompilationInfo* info);
+  ~CompilationPhase();
+
+ protected:
+  bool ShouldProduceTraceOutput() const;
+
+  const char* name() const { return name_; }
+  CompilationInfo* info() const { return info_; }
+  Isolate* isolate() const { return info()->isolate(); }
+  Zone* zone() { return &zone_; }
+
+ private:
+  const char* name_;
+  CompilationInfo* info_;
+  Zone zone_;
+  unsigned info_zone_start_allocation_size_;
+  int64_t start_ticks_;
+
+  DISALLOW_COPY_AND_ASSIGN(CompilationPhase);
 };
 
 

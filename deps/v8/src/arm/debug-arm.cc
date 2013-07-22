@@ -27,7 +27,7 @@
 
 #include "v8.h"
 
-#if defined(V8_TARGET_ARCH_ARM)
+#if V8_TARGET_ARCH_ARM
 
 #include "codegen.h"
 #include "debug.h"
@@ -48,23 +48,13 @@ void BreakLocationIterator::SetDebugBreakAtReturn() {
   //   add sp, sp, #4
   //   bx lr
   // to a call to the debug break return code.
-  // #ifdef USE_BLX
   //   ldr ip, [pc, #0]
   //   blx ip
-  // #else
-  //   mov lr, pc
-  //   ldr pc, [pc, #-4]
-  // #endif
   //   <debug break return code entry point address>
   //   bktp 0
   CodePatcher patcher(rinfo()->pc(), Assembler::kJSReturnSequenceInstructions);
-#ifdef USE_BLX
   patcher.masm()->ldr(v8::internal::ip, MemOperand(v8::internal::pc, 0));
   patcher.masm()->blx(v8::internal::ip);
-#else
-  patcher.masm()->mov(v8::internal::lr, v8::internal::pc);
-  patcher.masm()->ldr(v8::internal::pc, MemOperand(v8::internal::pc, -4));
-#endif
   patcher.Emit(Isolate::Current()->debug()->debug_break_return()->entry());
   patcher.masm()->bkpt(0);
 }
@@ -99,22 +89,12 @@ void BreakLocationIterator::SetDebugBreakAtSlot() {
   //   mov r2, r2
   //   mov r2, r2
   // to a call to the debug break slot code.
-  // #ifdef USE_BLX
   //   ldr ip, [pc, #0]
   //   blx ip
-  // #else
-  //   mov lr, pc
-  //   ldr pc, [pc, #-4]
-  // #endif
   //   <debug break slot code entry point address>
   CodePatcher patcher(rinfo()->pc(), Assembler::kDebugBreakSlotInstructions);
-#ifdef USE_BLX
   patcher.masm()->ldr(v8::internal::ip, MemOperand(v8::internal::pc, 0));
   patcher.masm()->blx(v8::internal::ip);
-#else
-  patcher.masm()->mov(v8::internal::lr, v8::internal::pc);
-  patcher.masm()->ldr(v8::internal::pc, MemOperand(v8::internal::pc, -4));
-#endif
   patcher.Emit(Isolate::Current()->debug()->debug_break_slot()->entry());
 }
 
@@ -152,7 +132,7 @@ static void Generate_DebugBreakCallHelper(MacroAssembler* masm,
             __ tst(reg, Operand(0xc0000000));
             __ Assert(eq, "Unable to encode value as smi");
           }
-          __ mov(reg, Operand(reg, LSL, kSmiTagSize));
+          __ SmiTag(reg);
         }
       }
       __ stm(db_w, sp, object_regs | non_object_regs);
@@ -174,7 +154,7 @@ static void Generate_DebugBreakCallHelper(MacroAssembler* masm,
         int r = JSCallerSavedCode(i);
         Register reg = { r };
         if ((non_object_regs & (1 << r)) != 0) {
-          __ mov(reg, Operand(reg, LSR, kSmiTagSize));
+          __ SmiUntag(reg);
         }
         if (FLAG_debug_code &&
             (((object_regs |non_object_regs) & (1 << r)) == 0)) {
@@ -241,6 +221,15 @@ void Debug::GenerateKeyedStoreICDebugBreak(MacroAssembler* masm) {
   //  -- r2     : receiver
   //  -- lr     : return address
   Generate_DebugBreakCallHelper(masm, r0.bit() | r1.bit() | r2.bit(), 0);
+}
+
+
+void Debug::GenerateCompareNilICDebugBreak(MacroAssembler* masm) {
+  // Register state for CompareNil IC
+  // ----------- S t a t e -------------
+  //  -- r0    : value
+  // -----------------------------------
+  Generate_DebugBreakCallHelper(masm, r0.bit(), 0);
 }
 
 

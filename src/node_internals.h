@@ -22,9 +22,12 @@
 #ifndef SRC_NODE_INTERNALS_H_
 #define SRC_NODE_INTERNALS_H_
 
+#include <assert.h>
 #include <stdlib.h>
 
 #include "v8.h"
+
+struct sockaddr;
 
 namespace node {
 
@@ -32,7 +35,77 @@ namespace node {
 extern v8::Isolate* node_isolate;
 
 // Defined in node.cc at startup.
-extern v8::Persistent<v8::Object> process;
+extern v8::Persistent<v8::Object> process_p;
+
+template <typename TypeName>
+class CachedBase {
+public:
+  CachedBase();
+  operator v8::Handle<TypeName>() const;
+  void operator=(v8::Handle<TypeName> that);  // Can only assign once.
+  bool IsEmpty() const;
+private:
+  CachedBase(const CachedBase&);
+  void operator=(const CachedBase&);
+  v8::Persistent<TypeName> handle_;
+};
+
+template <typename TypeName>
+class Cached : public CachedBase<TypeName> {
+public:
+  operator v8::Handle<v8::Value>() const;
+  void operator=(v8::Handle<TypeName> that);
+};
+
+template <>
+class Cached<v8::Value> : public CachedBase<v8::Value> {
+public:
+  operator v8::Handle<v8::Value>() const;
+  void operator=(v8::Handle<v8::Value> that);
+};
+
+// If persistent.IsWeak() == false, then do not call persistent.Dispose()
+// while the returned Local<T> is still in scope, it will destroy the
+// reference to the object.
+template <class TypeName>
+inline v8::Local<TypeName> PersistentToLocal(
+    const v8::Persistent<TypeName>& persistent);
+
+// If persistent.IsWeak() == false, then do not call persistent.Dispose()
+// while the returned Local<T> is still in scope, it will destroy the
+// reference to the object.
+template <class TypeName>
+inline v8::Local<TypeName> PersistentToLocal(
+    v8::Isolate* isolate,
+    const v8::Persistent<TypeName>& persistent);
+
+template <typename TypeName>
+v8::Handle<v8::Value> MakeCallback(
+    const v8::Persistent<v8::Object>& recv,
+    const TypeName method,
+    int argc,
+    v8::Handle<v8::Value>* argv);
+
+template <typename TypeName>
+v8::Handle<v8::Value> MakeCallback(
+    const v8::Persistent<v8::Object>& recv,
+    const Cached<TypeName>& method,
+    int argc,
+    v8::Handle<v8::Value>* argv);
+
+inline bool HasInstance(v8::Persistent<v8::FunctionTemplate>& function_template,
+                        v8::Handle<v8::Value> value);
+
+inline v8::Local<v8::Object> NewInstance(v8::Persistent<v8::Function>& ctor,
+                                          int argc = 0,
+                                          v8::Handle<v8::Value>* argv = NULL);
+
+// Convert a struct sockaddr to a { address: '1.2.3.4', port: 1234 } JS object.
+// Sets address and port properties on the info object and returns it.
+// If |info| is omitted, a new object is returned.
+v8::Local<v8::Object> AddressToJS(
+    const sockaddr* addr,
+    v8::Handle<v8::Object> info = v8::Handle<v8::Object>());
 
 #ifdef _WIN32
 // emulate snprintf() on windows, _snprintf() doesn't zero-terminate the buffer
@@ -74,41 +147,196 @@ inline static int snprintf(char* buf, unsigned int len, const char* fmt, ...) {
 # define ROUND_UP(a, b) ((a) % (b) ? ((a) + (b)) - ((a) % (b)) : (a))
 #endif
 
+#if defined(__GNUC__) && __GNUC__ >= 4
+# define MUST_USE_RESULT __attribute__((warn_unused_result))
+# define NO_RETURN __attribute__((noreturn))
+#else
+# define MUST_USE_RESULT
+# define NO_RETURN
+#endif
+
 // this would have been a template function were it not for the fact that g++
 // sometimes fails to resolve it...
 #define THROW_ERROR(fun)                                                      \
   do {                                                                        \
-    v8::HandleScope scope;                                                    \
-    return v8::ThrowException(fun(v8::String::New(errmsg)));                  \
+    v8::HandleScope scope(node_isolate);                                      \
+    v8::ThrowException(fun(v8::String::New(errmsg)));                         \
   }                                                                           \
   while (0)
 
-inline static v8::Handle<v8::Value> ThrowError(const char* errmsg) {
+inline static void ThrowError(const char* errmsg) {
   THROW_ERROR(v8::Exception::Error);
 }
 
-inline static v8::Handle<v8::Value> ThrowTypeError(const char* errmsg) {
+inline static void ThrowTypeError(const char* errmsg) {
   THROW_ERROR(v8::Exception::TypeError);
 }
 
-inline static v8::Handle<v8::Value> ThrowRangeError(const char* errmsg) {
+inline static void ThrowRangeError(const char* errmsg) {
   THROW_ERROR(v8::Exception::RangeError);
 }
 
+inline static void ThrowErrnoException(int errorno,
+                                       const char* syscall = NULL,
+                                       const char* message = NULL,
+                                       const char* path = NULL) {
+  v8::ThrowException(ErrnoException(errorno, syscall, message, path));
+}
+
+inline static void ThrowUVException(int errorno,
+                                    const char* syscall = NULL,
+                                    const char* message = NULL,
+                                    const char* path = NULL) {
+  v8::ThrowException(UVException(errorno, syscall, message, path));
+}
+
+NO_RETURN void FatalError(const char* location, const char* message);
+
 #define UNWRAP(type)                                                        \
-  assert(!args.Holder().IsEmpty());                                         \
-  assert(args.Holder()->InternalFieldCount() > 0);                          \
+  assert(!args.This().IsEmpty());                                           \
+  assert(args.This()->InternalFieldCount() > 0);                            \
   type* wrap = static_cast<type*>(                                          \
-      args.Holder()->GetAlignedPointerFromInternalField(0));                \
+      args.This()->GetAlignedPointerFromInternalField(0));                  \
   if (!wrap) {                                                              \
     fprintf(stderr, #type ": Aborting due to unwrap failure at %s:%d\n",    \
             __FILE__, __LINE__);                                            \
     abort();                                                                \
   }
 
-v8::Handle<v8::Value> FromConstructorTemplate(
-    v8::Persistent<v8::FunctionTemplate> t,
-    const v8::Arguments& args);
+// allow for quick domain check
+extern bool using_domains;
+
+enum Endianness {
+  kLittleEndian,  // _Not_ LITTLE_ENDIAN, clashes with endian.h.
+  kBigEndian
+};
+
+inline enum Endianness GetEndianness() {
+  // Constant-folded by the compiler.
+  const union {
+    uint8_t u8[2];
+    uint16_t u16;
+  } u = {
+    { 1, 0 }
+  };
+  return u.u16 == 1 ? kLittleEndian : kBigEndian;
+}
+
+inline bool IsLittleEndian() {
+  return GetEndianness() == kLittleEndian;
+}
+
+inline bool IsBigEndian() {
+  return GetEndianness() == kBigEndian;
+}
+
+// parse index for external array data
+inline MUST_USE_RESULT bool ParseArrayIndex(v8::Handle<v8::Value> arg,
+                                            size_t def,
+                                            size_t* ret) {
+  if (arg->IsUndefined()) {
+    *ret = def;
+    return true;
+  }
+
+  int32_t tmp_i = arg->Int32Value();
+
+  if (tmp_i < 0)
+    return false;
+
+  *ret = static_cast<size_t>(tmp_i);
+  return true;
+}
+
+template <class TypeName>
+inline v8::Local<TypeName> PersistentToLocal(
+    const v8::Persistent<TypeName>& persistent) {
+  return PersistentToLocal(node_isolate, persistent);
+}
+
+template <class TypeName>
+inline v8::Local<TypeName> PersistentToLocal(
+    v8::Isolate* isolate,
+    const v8::Persistent<TypeName>& persistent) {
+  if (persistent.IsWeak()) {
+    return v8::Local<TypeName>::New(isolate, persistent);
+  } else {
+    return *reinterpret_cast<v8::Local<TypeName>*>(
+        const_cast<v8::Persistent<TypeName>*>(&persistent));
+  }
+}
+
+template <typename TypeName>
+CachedBase<TypeName>::CachedBase() {
+}
+
+template <typename TypeName>
+CachedBase<TypeName>::operator v8::Handle<TypeName>() const {
+  return PersistentToLocal(handle_);
+}
+
+template <typename TypeName>
+void CachedBase<TypeName>::operator=(v8::Handle<TypeName> that) {
+  assert(handle_.IsEmpty() == true);  // Can only assign once.
+  handle_.Reset(node_isolate, that);
+}
+
+template <typename TypeName>
+bool CachedBase<TypeName>::IsEmpty() const {
+  return handle_.IsEmpty();
+}
+
+template <typename TypeName>
+Cached<TypeName>::operator v8::Handle<v8::Value>() const {
+  return CachedBase<TypeName>::operator v8::Handle<TypeName>();
+}
+
+template <typename TypeName>
+void Cached<TypeName>::operator=(v8::Handle<TypeName> that) {
+  CachedBase<TypeName>::operator=(that);
+}
+
+inline Cached<v8::Value>::operator v8::Handle<v8::Value>() const {
+  return CachedBase<v8::Value>::operator v8::Handle<v8::Value>();
+}
+
+inline void Cached<v8::Value>::operator=(v8::Handle<v8::Value> that) {
+  CachedBase<v8::Value>::operator=(that);
+}
+
+template <typename TypeName>
+v8::Handle<v8::Value> MakeCallback(
+    const v8::Persistent<v8::Object>& recv,
+    const TypeName method,
+    int argc,
+    v8::Handle<v8::Value>* argv) {
+  v8::Local<v8::Object> recv_obj = PersistentToLocal(recv);
+  return MakeCallback(recv_obj, method, argc, argv);
+}
+
+template <typename TypeName>
+v8::Handle<v8::Value> MakeCallback(
+    const v8::Persistent<v8::Object>& recv,
+    const Cached<TypeName>& method,
+    int argc,
+    v8::Handle<v8::Value>* argv) {
+  const v8::Handle<TypeName> handle = method;
+  return MakeCallback(recv, handle, argc, argv);
+}
+
+inline bool HasInstance(v8::Persistent<v8::FunctionTemplate>& function_template,
+                        v8::Handle<v8::Value> value) {
+  v8::Local<v8::FunctionTemplate> function_template_handle =
+      PersistentToLocal(function_template);
+  return function_template_handle->HasInstance(value);
+}
+
+inline v8::Local<v8::Object> NewInstance(v8::Persistent<v8::Function>& ctor,
+                                          int argc,
+                                          v8::Handle<v8::Value>* argv) {
+  v8::Local<v8::Function> constructor_handle = PersistentToLocal(ctor);
+  return constructor_handle->NewInstance(argc, argv);
+}
 
 } // namespace node
 

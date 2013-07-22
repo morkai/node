@@ -27,10 +27,11 @@
 
 #include "v8.h"
 
-#if defined(V8_TARGET_ARCH_X64)
+#if V8_TARGET_ARCH_X64
 
 #include "bootstrapper.h"
 #include "codegen.h"
+#include "cpu-profiler.h"
 #include "assembler-x64.h"
 #include "macro-assembler-x64.h"
 #include "serialize.h"
@@ -645,8 +646,8 @@ void MacroAssembler::TailCallExternalReference(const ExternalReference& ext,
                                                int num_arguments,
                                                int result_size) {
   // ----------- S t a t e -------------
-  //  -- rsp[0] : return address
-  //  -- rsp[8] : argument num_arguments - 1
+  //  -- rsp[0]                 : return address
+  //  -- rsp[8]                 : argument num_arguments - 1
   //  ...
   //  -- rsp[8 * num_arguments] : argument 0 (receiver)
   // -----------------------------------
@@ -677,8 +678,13 @@ static int Offset(ExternalReference ref0, ExternalReference ref1) {
 }
 
 
-void MacroAssembler::PrepareCallApiFunction(int arg_stack_space) {
+void MacroAssembler::PrepareCallApiFunction(int arg_stack_space,
+                                            bool returns_handle) {
 #if defined(_WIN64) && !defined(__MINGW64__)
+  if (!returns_handle) {
+    EnterApiExitFrame(arg_stack_space);
+    return;
+  }
   // We need to prepare a slot for result handle on stack and put
   // a pointer to it into 1st arg register.
   EnterApiExitFrame(arg_stack_space + 1);
@@ -692,8 +698,11 @@ void MacroAssembler::PrepareCallApiFunction(int arg_stack_space) {
 
 
 void MacroAssembler::CallApiFunctionAndReturn(Address function_address,
-                                              int stack_space) {
-  Label empty_result;
+                                              Address thunk_address,
+                                              Register thunk_last_arg,
+                                              int stack_space,
+                                              bool returns_handle,
+                                              int return_value_offset) {
   Label prologue;
   Label promote_scheduled_exception;
   Label delete_allocated_handles;
@@ -725,33 +734,65 @@ void MacroAssembler::CallApiFunctionAndReturn(Address function_address,
   if (FLAG_log_timer_events) {
     FrameScope frame(this, StackFrame::MANUAL);
     PushSafepointRegisters();
-    PrepareCallCFunction(0);
-    CallCFunction(ExternalReference::log_enter_external_function(isolate()), 0);
+    PrepareCallCFunction(1);
+    LoadAddress(arg_reg_1, ExternalReference::isolate_address(isolate()));
+    CallCFunction(ExternalReference::log_enter_external_function(isolate()), 1);
     PopSafepointRegisters();
   }
 
+
+  Label profiler_disabled;
+  Label end_profiler_check;
+  bool* is_profiling_flag =
+      isolate()->cpu_profiler()->is_profiling_address();
+  STATIC_ASSERT(sizeof(*is_profiling_flag) == 1);
+  movq(rax, is_profiling_flag, RelocInfo::EXTERNAL_REFERENCE);
+  cmpb(Operand(rax, 0), Immediate(0));
+  j(zero, &profiler_disabled);
+
+  // Third parameter is the address of the actual getter function.
+  movq(thunk_last_arg, function_address, RelocInfo::EXTERNAL_REFERENCE);
+  movq(rax, thunk_address, RelocInfo::EXTERNAL_REFERENCE);
+  jmp(&end_profiler_check);
+
+  bind(&profiler_disabled);
   // Call the api function!
   movq(rax, reinterpret_cast<int64_t>(function_address),
        RelocInfo::EXTERNAL_REFERENCE);
+
+  bind(&end_profiler_check);
+
+  // Call the api function!
   call(rax);
 
   if (FLAG_log_timer_events) {
     FrameScope frame(this, StackFrame::MANUAL);
     PushSafepointRegisters();
-    PrepareCallCFunction(0);
-    CallCFunction(ExternalReference::log_leave_external_function(isolate()), 0);
+    PrepareCallCFunction(1);
+    LoadAddress(arg_reg_1, ExternalReference::isolate_address(isolate()));
+    CallCFunction(ExternalReference::log_leave_external_function(isolate()), 1);
     PopSafepointRegisters();
   }
 
+  // Can skip the result check for new-style callbacks
+  // TODO(dcarney): may need to pass this information down
+  // as some function_addresses might not have been registered
+  if (returns_handle) {
+    Label empty_result;
 #if defined(_WIN64) && !defined(__MINGW64__)
-  // rax keeps a pointer to v8::Handle, unpack it.
-  movq(rax, Operand(rax, 0));
+    // rax keeps a pointer to v8::Handle, unpack it.
+    movq(rax, Operand(rax, 0));
 #endif
-  // Check if the result handle holds 0.
-  testq(rax, rax);
-  j(zero, &empty_result);
-  // It was non-zero.  Dereference to get the result value.
-  movq(rax, Operand(rax, 0));
+    // Check if the result handle holds 0.
+    testq(rax, rax);
+    j(zero, &empty_result);
+    // It was non-zero.  Dereference to get the result value.
+    movq(rax, Operand(rax, 0));
+    jmp(&prologue);
+    bind(&empty_result);
+  }
+  // Load the value from ReturnValue
+  movq(rax, Operand(rbp, return_value_offset * kPointerSize));
   bind(&prologue);
 
   // No more valid handles (the result handle was the last one). Restore
@@ -805,11 +846,6 @@ void MacroAssembler::CallApiFunctionAndReturn(Address function_address,
   LeaveApiExitFrame();
   ret(stack_space * kPointerSize);
 
-  bind(&empty_result);
-  // It was zero; the result is undefined.
-  LoadRoot(rax, Heap::kUndefinedValueRootIndex);
-  jmp(&prologue);
-
   bind(&promote_scheduled_exception);
   TailCallRuntime(Runtime::kPromoteScheduledException, 0, 1);
 
@@ -817,11 +853,7 @@ void MacroAssembler::CallApiFunctionAndReturn(Address function_address,
   bind(&delete_allocated_handles);
   movq(Operand(base_reg, kLimitOffset), prev_limit_reg);
   movq(prev_limit_reg, rax);
-#ifdef _WIN64
-  LoadAddress(rcx, ExternalReference::isolate_address());
-#else
-  LoadAddress(rdi, ExternalReference::isolate_address());
-#endif
+  LoadAddress(arg_reg_1, ExternalReference::isolate_address(isolate()));
   LoadAddress(rax,
               ExternalReference::delete_handle_scope_extensions(isolate()));
   call(rax);
@@ -899,7 +931,6 @@ void MacroAssembler::PushCallerSaved(SaveFPRegsMode fp_mode,
   }
   // R12 to r15 are callee save on all platforms.
   if (fp_mode == kSaveFPRegs) {
-    CpuFeatureScope scope(this, SSE2);
     subq(rsp, Immediate(kDoubleSize * XMMRegister::kMaxNumRegisters));
     for (int i = 0; i < XMMRegister::kMaxNumRegisters; i++) {
       XMMRegister reg = XMMRegister::from_code(i);
@@ -914,7 +945,6 @@ void MacroAssembler::PopCallerSaved(SaveFPRegsMode fp_mode,
                                     Register exclusion2,
                                     Register exclusion3) {
   if (fp_mode == kSaveFPRegs) {
-    CpuFeatureScope scope(this, SSE2);
     for (int i = 0; i < XMMRegister::kMaxNumRegisters; i++) {
       XMMRegister reg = XMMRegister::from_code(i);
       movsd(reg, Operand(rsp, i * kDoubleSize));
@@ -2279,6 +2309,32 @@ void MacroAssembler::JumpIfBothInstanceTypesAreNotSequentialAscii(
 }
 
 
+template<class T>
+static void JumpIfNotUniqueNameHelper(MacroAssembler* masm,
+                                      T operand_or_register,
+                                      Label* not_unique_name,
+                                      Label::Distance distance) {
+  STATIC_ASSERT(((SYMBOL_TYPE - 1) & kIsInternalizedMask) == kInternalizedTag);
+  masm->cmpb(operand_or_register, Immediate(kInternalizedTag));
+  masm->j(less, not_unique_name, distance);
+  masm->cmpb(operand_or_register, Immediate(SYMBOL_TYPE));
+  masm->j(greater, not_unique_name, distance);
+}
+
+
+void MacroAssembler::JumpIfNotUniqueName(Operand operand,
+                                         Label* not_unique_name,
+                                         Label::Distance distance) {
+  JumpIfNotUniqueNameHelper<Operand>(this, operand, not_unique_name, distance);
+}
+
+
+void MacroAssembler::JumpIfNotUniqueName(Register reg,
+                                         Label* not_unique_name,
+                                         Label::Distance distance) {
+  JumpIfNotUniqueNameHelper<Register>(this, reg, not_unique_name, distance);
+}
+
 
 void MacroAssembler::Move(Register dst, Register src) {
   if (!dst.is(src)) {
@@ -2288,20 +2344,22 @@ void MacroAssembler::Move(Register dst, Register src) {
 
 
 void MacroAssembler::Move(Register dst, Handle<Object> source) {
-  ASSERT(!source->IsFailure());
+  AllowDeferredHandleDereference smi_check;
   if (source->IsSmi()) {
     Move(dst, Smi::cast(*source));
   } else {
+    ASSERT(source->IsHeapObject());
     movq(dst, source, RelocInfo::EMBEDDED_OBJECT);
   }
 }
 
 
 void MacroAssembler::Move(const Operand& dst, Handle<Object> source) {
-  ASSERT(!source->IsFailure());
+  AllowDeferredHandleDereference smi_check;
   if (source->IsSmi()) {
     Move(dst, Smi::cast(*source));
   } else {
+    ASSERT(source->IsHeapObject());
     movq(kScratchRegister, source, RelocInfo::EMBEDDED_OBJECT);
     movq(dst, kScratchRegister);
   }
@@ -2309,16 +2367,19 @@ void MacroAssembler::Move(const Operand& dst, Handle<Object> source) {
 
 
 void MacroAssembler::Cmp(Register dst, Handle<Object> source) {
+  AllowDeferredHandleDereference smi_check;
   if (source->IsSmi()) {
     Cmp(dst, Smi::cast(*source));
   } else {
-    Move(kScratchRegister, source);
+    ASSERT(source->IsHeapObject());
+    movq(kScratchRegister, source, RelocInfo::EMBEDDED_OBJECT);
     cmpq(dst, kScratchRegister);
   }
 }
 
 
 void MacroAssembler::Cmp(const Operand& dst, Handle<Object> source) {
+  AllowDeferredHandleDereference smi_check;
   if (source->IsSmi()) {
     Cmp(dst, Smi::cast(*source));
   } else {
@@ -2330,6 +2391,7 @@ void MacroAssembler::Cmp(const Operand& dst, Handle<Object> source) {
 
 
 void MacroAssembler::Push(Handle<Object> source) {
+  AllowDeferredHandleDereference smi_check;
   if (source->IsSmi()) {
     Push(Smi::cast(*source));
   } else {
@@ -2342,10 +2404,10 @@ void MacroAssembler::Push(Handle<Object> source) {
 
 void MacroAssembler::LoadHeapObject(Register result,
                                     Handle<HeapObject> object) {
+  AllowDeferredHandleDereference using_raw_address;
   if (isolate()->heap()->InNewSpace(*object)) {
-    Handle<JSGlobalPropertyCell> cell =
-        isolate()->factory()->NewJSGlobalPropertyCell(object);
-    movq(result, cell, RelocInfo::GLOBAL_PROPERTY_CELL);
+    Handle<Cell> cell = isolate()->factory()->NewCell(object);
+    movq(result, cell, RelocInfo::CELL);
     movq(result, Operand(result, 0));
   } else {
     Move(result, object);
@@ -2353,11 +2415,23 @@ void MacroAssembler::LoadHeapObject(Register result,
 }
 
 
-void MacroAssembler::PushHeapObject(Handle<HeapObject> object) {
+void MacroAssembler::CmpHeapObject(Register reg, Handle<HeapObject> object) {
+  AllowDeferredHandleDereference using_raw_address;
   if (isolate()->heap()->InNewSpace(*object)) {
-    Handle<JSGlobalPropertyCell> cell =
-        isolate()->factory()->NewJSGlobalPropertyCell(object);
-    movq(kScratchRegister, cell, RelocInfo::GLOBAL_PROPERTY_CELL);
+    Handle<Cell> cell = isolate()->factory()->NewCell(object);
+    movq(kScratchRegister, cell, RelocInfo::CELL);
+    cmpq(reg, Operand(kScratchRegister, 0));
+  } else {
+    Cmp(reg, object);
+  }
+}
+
+
+void MacroAssembler::PushHeapObject(Handle<HeapObject> object) {
+  AllowDeferredHandleDereference using_raw_address;
+  if (isolate()->heap()->InNewSpace(*object)) {
+    Handle<Cell> cell = isolate()->factory()->NewCell(object);
+    movq(kScratchRegister, cell, RelocInfo::CELL);
     movq(kScratchRegister, Operand(kScratchRegister, 0));
     push(kScratchRegister);
   } else {
@@ -2366,12 +2440,12 @@ void MacroAssembler::PushHeapObject(Handle<HeapObject> object) {
 }
 
 
-void MacroAssembler::LoadGlobalCell(Register dst,
-                                    Handle<JSGlobalPropertyCell> cell) {
+void MacroAssembler::LoadGlobalCell(Register dst, Handle<Cell> cell) {
   if (dst.is(rax)) {
-    load_rax(cell.location(), RelocInfo::GLOBAL_PROPERTY_CELL);
+    AllowDeferredHandleDereference embedding_raw_address;
+    load_rax(cell.location(), RelocInfo::CELL);
   } else {
-    movq(dst, cell, RelocInfo::GLOBAL_PROPERTY_CELL);
+    movq(dst, cell, RelocInfo::CELL);
     movq(dst, Operand(dst, 0));
   }
 }
@@ -2614,7 +2688,8 @@ void MacroAssembler::JumpToHandlerEntry() {
   // rax = exception, rdi = code object, rdx = state.
   movq(rbx, FieldOperand(rdi, Code::kHandlerTableOffset));
   shr(rdx, Immediate(StackHandler::kKindWidth));
-  movq(rdx, FieldOperand(rbx, rdx, times_8, FixedArray::kHeaderSize));
+  movq(rdx,
+       FieldOperand(rbx, rdx, times_pointer_size, FixedArray::kHeaderSize));
   SmiToInteger64(rdx, rdx);
   lea(rdi, FieldOperand(rdi, rdx, times_1, Code::kHeaderSize));
   jmp(rdi);
@@ -2840,38 +2915,21 @@ void MacroAssembler::StoreNumberToDoubleElements(
 
 void MacroAssembler::CompareMap(Register obj,
                                 Handle<Map> map,
-                                Label* early_success,
-                                CompareMapMode mode) {
+                                Label* early_success) {
   Cmp(FieldOperand(obj, HeapObject::kMapOffset), map);
-  if (mode == ALLOW_ELEMENT_TRANSITION_MAPS) {
-    ElementsKind kind = map->elements_kind();
-    if (IsFastElementsKind(kind)) {
-      bool packed = IsFastPackedElementsKind(kind);
-      Map* current_map = *map;
-      while (CanTransitionToMoreGeneralFastElementsKind(kind, packed)) {
-        kind = GetNextMoreGeneralFastElementsKind(kind, packed);
-        current_map = current_map->LookupElementsTransitionMap(kind);
-        if (!current_map) break;
-        j(equal, early_success, Label::kNear);
-        Cmp(FieldOperand(obj, HeapObject::kMapOffset),
-            Handle<Map>(current_map));
-      }
-    }
-  }
 }
 
 
 void MacroAssembler::CheckMap(Register obj,
                               Handle<Map> map,
                               Label* fail,
-                              SmiCheckType smi_check_type,
-                              CompareMapMode mode) {
+                              SmiCheckType smi_check_type) {
   if (smi_check_type == DO_SMI_CHECK) {
     JumpIfSmi(obj, fail);
   }
 
   Label success;
-  CompareMap(obj, map, &success, mode);
+  CompareMap(obj, map, &success);
   j(not_equal, fail);
   bind(&success);
 }
@@ -3282,6 +3340,7 @@ void MacroAssembler::InvokeFunction(Register function,
 
 
 void MacroAssembler::InvokeFunction(Handle<JSFunction> function,
+                                    const ParameterCount& expected,
                                     const ParameterCount& actual,
                                     InvokeFlag flag,
                                     const CallWrapper& call_wrapper,
@@ -3297,7 +3356,6 @@ void MacroAssembler::InvokeFunction(Handle<JSFunction> function,
   // allow recompilation to take effect without changing any of the
   // call sites.
   movq(rdx, FieldOperand(rdi, JSFunction::kCodeEntryOffset));
-  ParameterCount expected(function->shared()->formal_parameter_count());
   InvokeCode(rdx, expected, actual, flag, call_wrapper, call_kind);
 }
 
@@ -3830,16 +3888,15 @@ void MacroAssembler::Allocate(int object_size,
 }
 
 
-void MacroAssembler::AllocateInNewSpace(int header_size,
-                                        ScaleFactor element_size,
-                                        Register element_count,
-                                        Register result,
-                                        Register result_end,
-                                        Register scratch,
-                                        Label* gc_required,
-                                        AllocationFlags flags) {
+void MacroAssembler::Allocate(int header_size,
+                              ScaleFactor element_size,
+                              Register element_count,
+                              Register result,
+                              Register result_end,
+                              Register scratch,
+                              Label* gc_required,
+                              AllocationFlags flags) {
   ASSERT((flags & SIZE_IN_WORDS) == 0);
-  ASSERT((flags & PRETENURE_OLD_POINTER_SPACE) == 0);
   if (!FLAG_inline_new) {
     if (emit_debug_code()) {
       // Trash the registers to simulate an allocation failure.
@@ -3866,15 +3923,15 @@ void MacroAssembler::AllocateInNewSpace(int header_size,
   }
 
   // Calculate new top and bail out if new space is exhausted.
-  ExternalReference new_space_allocation_limit =
-      ExternalReference::new_space_allocation_limit_address(isolate());
+  ExternalReference allocation_limit =
+      AllocationUtils::GetAllocationLimitReference(isolate(), flags);
 
   // We assume that element_count*element_size + header_size does not
   // overflow.
   lea(result_end, Operand(element_count, element_size, header_size));
   addq(result_end, result);
   j(carry, gc_required);
-  Operand limit_operand = ExternalOperand(new_space_allocation_limit);
+  Operand limit_operand = ExternalOperand(allocation_limit);
   cmpq(result_end, limit_operand);
   j(above, gc_required);
 
@@ -3889,14 +3946,13 @@ void MacroAssembler::AllocateInNewSpace(int header_size,
 }
 
 
-void MacroAssembler::AllocateInNewSpace(Register object_size,
-                                        Register result,
-                                        Register result_end,
-                                        Register scratch,
-                                        Label* gc_required,
-                                        AllocationFlags flags) {
+void MacroAssembler::Allocate(Register object_size,
+                              Register result,
+                              Register result_end,
+                              Register scratch,
+                              Label* gc_required,
+                              AllocationFlags flags) {
   ASSERT((flags & (RESULT_CONTAINS_TOP | SIZE_IN_WORDS)) == 0);
-  ASSERT((flags & PRETENURE_OLD_POINTER_SPACE) == 0);
   if (!FLAG_inline_new) {
     if (emit_debug_code()) {
       // Trash the registers to simulate an allocation failure.
@@ -3916,14 +3972,14 @@ void MacroAssembler::AllocateInNewSpace(Register object_size,
   LoadAllocationTopHelper(result, scratch, flags);
 
   // Calculate new top and bail out if new space is exhausted.
-  ExternalReference new_space_allocation_limit =
-      ExternalReference::new_space_allocation_limit_address(isolate());
+  ExternalReference allocation_limit =
+      AllocationUtils::GetAllocationLimitReference(isolate(), flags);
   if (!object_size.is(result_end)) {
     movq(result_end, object_size);
   }
   addq(result_end, result);
   j(carry, gc_required);
-  Operand limit_operand = ExternalOperand(new_space_allocation_limit);
+  Operand limit_operand = ExternalOperand(allocation_limit);
   cmpq(result_end, limit_operand);
   j(above, gc_required);
 
@@ -3991,14 +4047,14 @@ void MacroAssembler::AllocateTwoByteString(Register result,
   }
 
   // Allocate two byte string in new space.
-  AllocateInNewSpace(SeqTwoByteString::kHeaderSize,
-                     times_1,
-                     scratch1,
-                     result,
-                     scratch2,
-                     scratch3,
-                     gc_required,
-                     TAG_OBJECT);
+  Allocate(SeqTwoByteString::kHeaderSize,
+           times_1,
+           scratch1,
+           result,
+           scratch2,
+           scratch3,
+           gc_required,
+           TAG_OBJECT);
 
   // Set the map, length and hash field.
   LoadRoot(kScratchRegister, Heap::kStringMapRootIndex);
@@ -4029,14 +4085,14 @@ void MacroAssembler::AllocateAsciiString(Register result,
   }
 
   // Allocate ASCII string in new space.
-  AllocateInNewSpace(SeqOneByteString::kHeaderSize,
-                     times_1,
-                     scratch1,
-                     result,
-                     scratch2,
-                     scratch3,
-                     gc_required,
-                     TAG_OBJECT);
+  Allocate(SeqOneByteString::kHeaderSize,
+           times_1,
+           scratch1,
+           result,
+           scratch2,
+           scratch3,
+           gc_required,
+           TAG_OBJECT);
 
   // Set the map, length and hash field.
   LoadRoot(kScratchRegister, Heap::kAsciiStringMapRootIndex);
@@ -4066,9 +4122,33 @@ void MacroAssembler::AllocateAsciiConsString(Register result,
                                              Register scratch1,
                                              Register scratch2,
                                              Label* gc_required) {
-  // Allocate heap number in new space.
-  Allocate(ConsString::kSize, result, scratch1, scratch2, gc_required,
-           TAG_OBJECT);
+  Label allocate_new_space, install_map;
+  AllocationFlags flags = TAG_OBJECT;
+
+  ExternalReference high_promotion_mode = ExternalReference::
+      new_space_high_promotion_mode_active_address(isolate());
+
+  Load(scratch1, high_promotion_mode);
+  testb(scratch1, Immediate(1));
+  j(zero, &allocate_new_space);
+  Allocate(ConsString::kSize,
+           result,
+           scratch1,
+           scratch2,
+           gc_required,
+           static_cast<AllocationFlags>(flags | PRETENURE_OLD_POINTER_SPACE));
+
+  jmp(&install_map);
+
+  bind(&allocate_new_space);
+  Allocate(ConsString::kSize,
+           result,
+           scratch1,
+           scratch2,
+           gc_required,
+           flags);
+
+  bind(&install_map);
 
   // Set the map. The other fields are left uninitialized.
   LoadRoot(kScratchRegister, Heap::kConsAsciiStringMapRootIndex);
@@ -4137,12 +4217,12 @@ void MacroAssembler::CopyBytes(Register destination,
   // we keep source aligned for the rep movs operation by copying the odd bytes
   // at the end of the ranges.
   movq(scratch, length);
-  shrl(length, Immediate(3));
+  shrl(length, Immediate(kPointerSizeLog2));
   repmovsq();
   // Move remaining bytes of length.
-  andl(scratch, Immediate(0x7));
-  movq(length, Operand(source, scratch, times_1, -8));
-  movq(Operand(destination, scratch, times_1, -8), length);
+  andl(scratch, Immediate(kPointerSize - 1));
+  movq(length, Operand(source, scratch, times_1, -kPointerSize));
+  movq(Operand(destination, scratch, times_1, -kPointerSize), length);
   addq(destination, scratch);
 
   if (min_length <= kLongStringLimit) {
@@ -4411,6 +4491,19 @@ void MacroAssembler::CheckPageFlag(
     testl(Operand(scratch, MemoryChunk::kFlagsOffset), Immediate(mask));
   }
   j(cc, condition_met, condition_met_distance);
+}
+
+
+void MacroAssembler::CheckMapDeprecated(Handle<Map> map,
+                                        Register scratch,
+                                        Label* if_deprecated) {
+  if (map->CanBeDeprecated()) {
+    Move(scratch, map);
+    movq(scratch, FieldOperand(scratch, Map::kBitField3Offset));
+    SmiToInteger32(scratch, scratch);
+    and_(scratch, Immediate(Map::Deprecated::kMask));
+    j(not_zero, if_deprecated);
+  }
 }
 
 

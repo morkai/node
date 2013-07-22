@@ -94,12 +94,18 @@ void OS::Guard(void* address, const size_t size) {
 
 
 void* OS::GetRandomMmapAddr() {
+#if defined(__native_client__)
+  // TODO(bradchen): restore randomization once Native Client gets
+  // smarter about using mmap address hints.
+  // See http://code.google.com/p/nativeclient/issues/3341
+  return NULL;
+#endif
   Isolate* isolate = Isolate::UncheckedCurrent();
   // Note that the current isolate isn't set up in a call path via
   // CpuFeatures::Probe. We don't care about randomization in this case because
   // the code page is immediately freed.
   if (isolate != NULL) {
-#ifdef V8_TARGET_ARCH_X64
+#if V8_TARGET_ARCH_X64
     uint64_t rnd1 = V8::RandomPrivate(isolate);
     uint64_t rnd2 = V8::RandomPrivate(isolate);
     uint64_t raw_addr = (rnd1 << 32) ^ rnd2;
@@ -213,7 +219,7 @@ int64_t OS::Ticks() {
 
 
 double OS::DaylightSavingsOffset(double time) {
-  if (isnan(time)) return nan_value();
+  if (std::isnan(time)) return nan_value();
   time_t tv = static_cast<time_t>(floor(time/msPerSecond));
   struct tm* t = localtime(&tv);
   if (NULL == t) return nan_value();
@@ -330,26 +336,34 @@ int OS::VSNPrintF(Vector<char> str,
 }
 
 
-#if defined(V8_TARGET_ARCH_IA32)
-static OS::MemCopyFunction memcopy_function = NULL;
-// Defined in codegen-ia32.cc.
-OS::MemCopyFunction CreateMemCopyFunction();
+#if V8_TARGET_ARCH_IA32
+static void MemMoveWrapper(void* dest, const void* src, size_t size) {
+  memmove(dest, src, size);
+}
 
-// Copy memory area to disjoint memory area.
-void OS::MemCopy(void* dest, const void* src, size_t size) {
+// Initialize to library version so we can call this at any time during startup.
+static OS::MemMoveFunction memmove_function = &MemMoveWrapper;
+
+// Defined in codegen-ia32.cc.
+OS::MemMoveFunction CreateMemMoveFunction();
+
+// Copy memory area. No restrictions.
+void OS::MemMove(void* dest, const void* src, size_t size) {
+  if (size == 0) return;
   // Note: here we rely on dependent reads being ordered. This is true
   // on all architectures we currently support.
-  (*memcopy_function)(dest, src, size);
-#ifdef DEBUG
-  CHECK_EQ(0, memcmp(dest, src, size));
-#endif
+  (*memmove_function)(dest, src, size);
 }
+
 #endif  // V8_TARGET_ARCH_IA32
 
 
 void POSIXPostSetUp() {
-#if defined(V8_TARGET_ARCH_IA32)
-  memcopy_function = CreateMemCopyFunction();
+#if V8_TARGET_ARCH_IA32
+  OS::MemMoveFunction generated_memmove = CreateMemMoveFunction();
+  if (generated_memmove != NULL) {
+    memmove_function = generated_memmove;
+  }
 #endif
   init_fast_sin_function();
   init_fast_cos_function();

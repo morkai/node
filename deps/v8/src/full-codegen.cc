@@ -163,6 +163,12 @@ void BreakableStatementChecker::VisitForInStatement(ForInStatement* stmt) {
 }
 
 
+void BreakableStatementChecker::VisitForOfStatement(ForOfStatement* stmt) {
+  // For-of is breakable because of the next() call.
+  is_breakable_ = true;
+}
+
+
 void BreakableStatementChecker::VisitTryCatchStatement(
     TryCatchStatement* stmt) {
   // Mark try catch as breakable to avoid adding a break slot in front of it.
@@ -232,6 +238,12 @@ void BreakableStatementChecker::VisitAssignment(Assignment* expr) {
 }
 
 
+void BreakableStatementChecker::VisitYield(Yield* expr) {
+  // Yield is breakable if the expression is.
+  Visit(expr->expression());
+}
+
+
 void BreakableStatementChecker::VisitThrow(Throw* expr) {
   // Throw is breakable if the expression is.
   Visit(expr->exception());
@@ -298,10 +310,7 @@ bool FullCodeGenerator::MakeCode(CompilationInfo* info) {
     int len = String::cast(script->source())->length();
     isolate->counters()->total_full_codegen_source_size()->Increment(len);
   }
-  if (FLAG_trace_codegen) {
-    PrintF("Full Compiler - ");
-  }
-  CodeGenerator::MakeCodePrologue(info);
+  CodeGenerator::MakeCodePrologue(info, "full");
   const int kInitialBufferSize = 4 * KB;
   MacroAssembler masm(info->isolate(), NULL, kInitialBufferSize);
 #ifdef ENABLE_GDB_JIT_INTERFACE
@@ -316,7 +325,7 @@ bool FullCodeGenerator::MakeCode(CompilationInfo* info) {
     ASSERT(!isolate->has_pending_exception());
     return false;
   }
-  unsigned table_offset = cgen.EmitStackCheckTable();
+  unsigned table_offset = cgen.EmitBackEdgeTable();
 
   Code::Flags flags = Code::ComputeFlags(Code::FUNCTION);
   Handle<Code> code = CodeGenerator::MakeCodeEpilogue(&masm, flags, info);
@@ -335,8 +344,8 @@ bool FullCodeGenerator::MakeCode(CompilationInfo* info) {
 #endif  // ENABLE_DEBUGGER_SUPPORT
   code->set_allow_osr_at_loop_nesting_level(0);
   code->set_profiler_ticks(0);
-  code->set_stack_check_table_offset(table_offset);
-  code->set_stack_check_patched_for_osr(false);
+  code->set_back_edge_table_offset(table_offset);
+  code->set_back_edges_patched_for_osr(false);
   CodeGenerator::PrintCode(code, info);
   info->SetCode(code);  // May be an empty handle.
 #ifdef ENABLE_GDB_JIT_INTERFACE
@@ -356,17 +365,18 @@ bool FullCodeGenerator::MakeCode(CompilationInfo* info) {
 }
 
 
-unsigned FullCodeGenerator::EmitStackCheckTable() {
-  // The stack check table consists of a length (in number of entries)
+unsigned FullCodeGenerator::EmitBackEdgeTable() {
+  // The back edge table consists of a length (in number of entries)
   // field, and then a sequence of entries.  Each entry is a pair of AST id
   // and code-relative pc offset.
   masm()->Align(kIntSize);
   unsigned offset = masm()->pc_offset();
-  unsigned length = stack_checks_.length();
+  unsigned length = back_edges_.length();
   __ dd(length);
   for (unsigned i = 0; i < length; ++i) {
-    __ dd(stack_checks_[i].id.ToInt());
-    __ dd(stack_checks_[i].pc_and_state);
+    __ dd(back_edges_[i].id.ToInt());
+    __ dd(back_edges_[i].pc);
+    __ db(back_edges_[i].loop_depth);
   }
   return offset;
 }
@@ -463,7 +473,7 @@ void FullCodeGenerator::PrepareForBailoutForId(BailoutId id, State state) {
 
 
 void FullCodeGenerator::RecordTypeFeedbackCell(
-    TypeFeedbackId id, Handle<JSGlobalPropertyCell> cell) {
+    TypeFeedbackId id, Handle<Cell> cell) {
   TypeFeedbackCellEntry entry = { id, cell };
   type_feedback_cells_.Add(entry, zone());
 }
@@ -472,8 +482,11 @@ void FullCodeGenerator::RecordTypeFeedbackCell(
 void FullCodeGenerator::RecordBackEdge(BailoutId ast_id) {
   // The pc offset does not need to be encoded and packed together with a state.
   ASSERT(masm_->pc_offset() > 0);
-  BailoutEntry entry = { ast_id, static_cast<unsigned>(masm_->pc_offset()) };
-  stack_checks_.Add(entry, zone());
+  ASSERT(loop_depth() > 0);
+  uint8_t depth = Min(loop_depth(), Code::kMaxLoopNestingMarker);
+  BackEdgeEntry entry =
+      { ast_id, static_cast<unsigned>(masm_->pc_offset()), depth };
+  back_edges_.Add(entry, zone());
 }
 
 
@@ -913,6 +926,25 @@ void FullCodeGenerator::EmitInlineRuntimeCall(CallRuntime* expr) {
 }
 
 
+void FullCodeGenerator::EmitGeneratorNext(CallRuntime* expr) {
+  ZoneList<Expression*>* args = expr->arguments();
+  ASSERT(args->length() == 2);
+  EmitGeneratorResume(args->at(0), args->at(1), JSGeneratorObject::NEXT);
+}
+
+
+void FullCodeGenerator::EmitGeneratorThrow(CallRuntime* expr) {
+  ZoneList<Expression*>* args = expr->arguments();
+  ASSERT(args->length() == 2);
+  EmitGeneratorResume(args->at(0), args->at(1), JSGeneratorObject::THROW);
+}
+
+
+void FullCodeGenerator::EmitDebugBreakInOptimizedCode(CallRuntime* expr) {
+  context()->Plug(handle(Smi::FromInt(0), isolate()));
+}
+
+
 void FullCodeGenerator::VisitBinaryOperation(BinaryOperation* expr) {
   switch (expr->op()) {
     case Token::COMMA:
@@ -1203,13 +1235,7 @@ void FullCodeGenerator::VisitBreakStatement(BreakStatement* stmt) {
 }
 
 
-void FullCodeGenerator::VisitReturnStatement(ReturnStatement* stmt) {
-  Comment cmnt(masm_, "[ ReturnStatement");
-  SetStatementPosition(stmt);
-  Expression* expr = stmt->expression();
-  VisitForAccumulatorValue(expr);
-
-  // Exit all nested statements.
+void FullCodeGenerator::EmitUnwindBeforeReturn() {
   NestedStatement* current = nesting_stack_;
   int stack_depth = 0;
   int context_length = 0;
@@ -1217,7 +1243,15 @@ void FullCodeGenerator::VisitReturnStatement(ReturnStatement* stmt) {
     current = current->Exit(&stack_depth, &context_length);
   }
   __ Drop(stack_depth);
+}
 
+
+void FullCodeGenerator::VisitReturnStatement(ReturnStatement* stmt) {
+  Comment cmnt(masm_, "[ ReturnStatement");
+  SetStatementPosition(stmt);
+  Expression* expr = stmt->expression();
+  VisitForAccumulatorValue(expr);
+  EmitUnwindBeforeReturn();
   EmitReturnSequence();
 }
 
@@ -1231,9 +1265,12 @@ void FullCodeGenerator::VisitWithStatement(WithStatement* stmt) {
   __ CallRuntime(Runtime::kPushWithContext, 2);
   StoreToFrameField(StandardFrameConstants::kContextOffset, context_register());
 
+  Scope* saved_scope = scope();
+  scope_ = stmt->scope();
   { WithOrCatch body(this);
     Visit(stmt->statement());
   }
+  scope_ = saved_scope;
 
   // Pop context.
   LoadContextField(context_register(), Context::PREVIOUS_INDEX);
@@ -1245,7 +1282,7 @@ void FullCodeGenerator::VisitWithStatement(WithStatement* stmt) {
 void FullCodeGenerator::VisitDoWhileStatement(DoWhileStatement* stmt) {
   Comment cmnt(masm_, "[ DoWhileStatement");
   SetStatementPosition(stmt);
-  Label body, stack_check;
+  Label body, book_keeping;
 
   Iteration loop_statement(this, stmt);
   increment_loop_depth();
@@ -1259,13 +1296,13 @@ void FullCodeGenerator::VisitDoWhileStatement(DoWhileStatement* stmt) {
   PrepareForBailoutForId(stmt->ContinueId(), NO_REGISTERS);
   SetExpressionPosition(stmt->cond(), stmt->condition_position());
   VisitForControl(stmt->cond(),
-                  &stack_check,
+                  &book_keeping,
                   loop_statement.break_label(),
-                  &stack_check);
+                  &book_keeping);
 
   // Check stack before looping.
   PrepareForBailoutForId(stmt->BackEdgeId(), NO_REGISTERS);
-  __ bind(&stack_check);
+  __ bind(&book_keeping);
   EmitBackEdgeBookkeeping(stmt, &body);
   __ jmp(&body);
 
@@ -1513,7 +1550,7 @@ void FullCodeGenerator::VisitConditional(Conditional* expr) {
 
 void FullCodeGenerator::VisitLiteral(Literal* expr) {
   Comment cmnt(masm_, "[ Literal");
-  context()->Plug(expr->handle());
+  context()->Plug(expr->value());
 }
 
 

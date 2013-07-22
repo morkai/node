@@ -91,6 +91,10 @@ class MacroAssembler: public Assembler {
       Label* condition_met,
       Label::Distance condition_met_distance = Label::kFar);
 
+  void CheckMapDeprecated(Handle<Map> map,
+                          Register scratch,
+                          Label* if_deprecated);
+
   // Check if object is in new space.  Jumps if the object is not in new space.
   // The register scratch can be object itself, but scratch will be clobbered.
   void JumpIfNotInNewSpace(Register object,
@@ -268,13 +272,24 @@ class MacroAssembler: public Assembler {
   void LoadFromSafepointRegisterSlot(Register dst, Register src);
 
   void LoadHeapObject(Register result, Handle<HeapObject> object);
+  void CmpHeapObject(Register reg, Handle<HeapObject> object);
   void PushHeapObject(Handle<HeapObject> object);
 
   void LoadObject(Register result, Handle<Object> object) {
+    AllowDeferredHandleDereference heap_object_check;
     if (object->IsHeapObject()) {
       LoadHeapObject(result, Handle<HeapObject>::cast(object));
     } else {
       Set(result, Immediate(object));
+    }
+  }
+
+  void CmpObject(Register reg, Handle<Object> object) {
+    AllowDeferredHandleDereference heap_object_check;
+    if (object->IsHeapObject()) {
+      CmpHeapObject(reg, Handle<HeapObject>::cast(object));
+    } else {
+      cmp(reg, Immediate(object));
     }
   }
 
@@ -320,6 +335,7 @@ class MacroAssembler: public Assembler {
                       CallKind call_kind);
 
   void InvokeFunction(Handle<JSFunction> function,
+                      const ParameterCount& expected,
                       const ParameterCount& actual,
                       InvokeFlag flag,
                       const CallWrapper& call_wrapper,
@@ -393,8 +409,7 @@ class MacroAssembler: public Assembler {
   // sequences branches to early_success.
   void CompareMap(Register obj,
                   Handle<Map> map,
-                  Label* early_success,
-                  CompareMapMode mode = REQUIRE_EXACT_MAP);
+                  Label* early_success);
 
   // Check if the map of an object is equal to a specified map and branch to
   // label if not. Skip the smi check if not required (object is known to be a
@@ -403,8 +418,7 @@ class MacroAssembler: public Assembler {
   void CheckMap(Register obj,
                 Handle<Map> map,
                 Label* fail,
-                SmiCheckType smi_check_type,
-                CompareMapMode mode = REQUIRE_EXACT_MAP);
+                SmiCheckType smi_check_type);
 
   // Check if the map of an object is equal to a specified map and branch to a
   // specified target if equal. Skip the smi check if not required (object is
@@ -548,7 +562,8 @@ class MacroAssembler: public Assembler {
   // on access to global objects across environments. The holder register
   // is left untouched, but the scratch register is clobbered.
   void CheckAccessGlobalProxy(Register holder_reg,
-                              Register scratch,
+                              Register scratch1,
+                              Register scratch2,
                               Label* miss);
 
   void GetNumberHash(Register r0, Register scratch);
@@ -582,22 +597,22 @@ class MacroAssembler: public Assembler {
                 Label* gc_required,
                 AllocationFlags flags);
 
-  void AllocateInNewSpace(int header_size,
-                          ScaleFactor element_size,
-                          Register element_count,
-                          RegisterValueType element_count_type,
-                          Register result,
-                          Register result_end,
-                          Register scratch,
-                          Label* gc_required,
-                          AllocationFlags flags);
+  void Allocate(int header_size,
+                ScaleFactor element_size,
+                Register element_count,
+                RegisterValueType element_count_type,
+                Register result,
+                Register result_end,
+                Register scratch,
+                Label* gc_required,
+                AllocationFlags flags);
 
-  void AllocateInNewSpace(Register object_size,
-                          Register result,
-                          Register result_end,
-                          Register scratch,
-                          Label* gc_required,
-                          AllocationFlags flags);
+  void Allocate(Register object_size,
+                Register result,
+                Register result_end,
+                Register scratch,
+                Label* gc_required,
+                AllocationFlags flags);
 
   // Undo allocation in new space. The object passed and objects allocated after
   // it will no longer be allocated. Make sure that no pointers are left to the
@@ -762,13 +777,18 @@ class MacroAssembler: public Assembler {
   // Arguments must be stored in ApiParameterOperand(0), ApiParameterOperand(1)
   // etc. Saves context (esi). If space was reserved for return value then
   // stores the pointer to the reserved slot into esi.
-  void PrepareCallApiFunction(int argc);
+  void PrepareCallApiFunction(int argc, bool returns_handle);
 
   // Calls an API function.  Allocates HandleScope, extracts returned value
   // from handle and propagates exceptions.  Clobbers ebx, edi and
   // caller-save registers.  Restores context.  On return removes
   // stack_space * kPointerSize (GCed).
-  void CallApiFunctionAndReturn(Address function_address, int stack_space);
+  void CallApiFunctionAndReturn(Address function_address,
+                                Address thunk_address,
+                                Operand thunk_last_arg,
+                                int stack_space,
+                                bool returns_handle,
+                                int return_value_offset_from_ebp);
 
   // Jump to a runtime routine.
   void JumpToExternalReference(const ExternalReference& ext);
@@ -806,6 +826,8 @@ class MacroAssembler: public Assembler {
     return code_object_;
   }
 
+  // Insert code to verify that the x87 stack has the specified depth (0-7)
+  void VerifyX87StackDepth(uint32_t depth);
 
   // ---------------------------------------------------------------------------
   // StatsCounter support
@@ -861,6 +883,15 @@ class MacroAssembler: public Assembler {
                                            Register scratch1,
                                            Register scratch2,
                                            Label* on_not_flat_ascii_strings);
+
+  // Checks if the given register or operand is a unique name
+  void JumpIfNotUniqueName(Register reg, Label* not_unique_name,
+                           Label::Distance distance = Label::kFar) {
+    JumpIfNotUniqueName(Operand(reg), not_unique_name, distance);
+  }
+
+  void JumpIfNotUniqueName(Operand operand, Label* not_unique_name,
+                           Label::Distance distance = Label::kFar);
 
   static int SafepointRegisterStackIndex(Register reg) {
     return SafepointRegisterStackIndex(reg.code());
@@ -1001,7 +1032,7 @@ inline Operand GlobalObjectOperand() {
 
 
 // Generates an Operand for saving parameters after PrepareCallApiFunction.
-Operand ApiParameterOperand(int index);
+Operand ApiParameterOperand(int index, bool returns_handle);
 
 
 #ifdef GENERATED_CODE_COVERAGE

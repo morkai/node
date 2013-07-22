@@ -67,9 +67,21 @@ namespace internal {
 //   http://www.agner.org/optimize/calling_conventions.pdf
 //   or with gcc, run: "echo | gcc -E -dM -"
 #if defined(_M_X64) || defined(__x86_64__)
+#if defined(__native_client__)
+// For Native Client builds of V8, use V8_TARGET_ARCH_ARM, so that V8
+// generates ARM machine code, together with a portable ARM simulator
+// compiled for the host architecture in question.
+//
+// Since Native Client is ILP-32 on all architectures we use
+// V8_HOST_ARCH_IA32 on both 32- and 64-bit x86.
+#define V8_HOST_ARCH_IA32 1
+#define V8_HOST_ARCH_32_BIT 1
+#define V8_HOST_CAN_READ_UNALIGNED 1
+#else
 #define V8_HOST_ARCH_X64 1
 #define V8_HOST_ARCH_64_BIT 1
 #define V8_HOST_CAN_READ_UNALIGNED 1
+#endif  // __native_client__
 #elif defined(_M_IX86) || defined(__i386__)
 #define V8_HOST_ARCH_IA32 1
 #define V8_HOST_ARCH_32_BIT 1
@@ -93,8 +105,8 @@ namespace internal {
 // Target architecture detection. This may be set externally. If not, detect
 // in the same way as the host architecture, that is, target the native
 // environment as presented by the compiler.
-#if !defined(V8_TARGET_ARCH_X64) && !defined(V8_TARGET_ARCH_IA32) && \
-    !defined(V8_TARGET_ARCH_ARM) && !defined(V8_TARGET_ARCH_MIPS)
+#if !V8_TARGET_ARCH_X64 && !V8_TARGET_ARCH_IA32 && \
+    !V8_TARGET_ARCH_ARM && !V8_TARGET_ARCH_MIPS
 #if defined(_M_X64) || defined(__x86_64__)
 #define V8_TARGET_ARCH_X64 1
 #elif defined(_M_IX86) || defined(__i386__)
@@ -109,18 +121,16 @@ namespace internal {
 #endif
 
 // Check for supported combinations of host and target architectures.
-#if defined(V8_TARGET_ARCH_IA32) && !defined(V8_HOST_ARCH_IA32)
+#if V8_TARGET_ARCH_IA32 && !V8_HOST_ARCH_IA32
 #error Target architecture ia32 is only supported on ia32 host
 #endif
-#if defined(V8_TARGET_ARCH_X64) && !defined(V8_HOST_ARCH_X64)
+#if V8_TARGET_ARCH_X64 && !V8_HOST_ARCH_X64
 #error Target architecture x64 is only supported on x64 host
 #endif
-#if (defined(V8_TARGET_ARCH_ARM) && \
-    !(defined(V8_HOST_ARCH_IA32) || defined(V8_HOST_ARCH_ARM)))
+#if (V8_TARGET_ARCH_ARM && !(V8_HOST_ARCH_IA32 || V8_HOST_ARCH_ARM))
 #error Target architecture arm is only supported on arm and ia32 host
 #endif
-#if (defined(V8_TARGET_ARCH_MIPS) && \
-    !(defined(V8_HOST_ARCH_IA32) || defined(V8_HOST_ARCH_MIPS)))
+#if (V8_TARGET_ARCH_MIPS && !(V8_HOST_ARCH_IA32 || V8_HOST_ARCH_MIPS))
 #error Target architecture mips is only supported on mips and ia32 host
 #endif
 
@@ -128,12 +138,25 @@ namespace internal {
 // Setting USE_SIMULATOR explicitly from the build script will force
 // the use of a simulated environment.
 #if !defined(USE_SIMULATOR)
-#if (defined(V8_TARGET_ARCH_ARM) && !defined(V8_HOST_ARCH_ARM))
+#if (V8_TARGET_ARCH_ARM && !V8_HOST_ARCH_ARM)
 #define USE_SIMULATOR 1
 #endif
-#if (defined(V8_TARGET_ARCH_MIPS) && !defined(V8_HOST_ARCH_MIPS))
+#if (V8_TARGET_ARCH_MIPS && !V8_HOST_ARCH_MIPS)
 #define USE_SIMULATOR 1
 #endif
+#endif
+
+// Determine architecture endiannes (we only support little-endian).
+#if V8_TARGET_ARCH_IA32
+#define V8_TARGET_LITTLE_ENDIAN 1
+#elif V8_TARGET_ARCH_X64
+#define V8_TARGET_LITTLE_ENDIAN 1
+#elif V8_TARGET_ARCH_ARM
+#define V8_TARGET_LITTLE_ENDIAN 1
+#elif V8_TARGET_ARCH_MIPS
+#define V8_TARGET_LITTLE_ENDIAN 1
+#else
+#error Unknown target architecture endiannes
 #endif
 
 // Support for alternative bool type. This is only enabled if the code is
@@ -384,6 +407,18 @@ enum LanguageMode {
   CLASSIC_MODE,
   STRICT_MODE,
   EXTENDED_MODE
+};
+
+
+// A simple Maybe type, that can be passed by value.
+template<class T>
+struct Maybe {
+  Maybe() : has_value(false) {}
+  explicit Maybe(T t) : has_value(true), value(t) {}
+  Maybe(bool has, T t) : has_value(has), value(t) {}
+
+  bool has_value;
+  T value;
 };
 
 

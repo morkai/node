@@ -81,10 +81,10 @@ TEST(MalformedOctal) {
   CHECK_EQ(81.0, StringToDouble(&uc, "081", ALLOW_HEX | ALLOW_OCTALS));
   CHECK_EQ(78.0, StringToDouble(&uc, "078", ALLOW_HEX | ALLOW_OCTALS));
 
-  CHECK(isnan(StringToDouble(&uc, "07.7", ALLOW_HEX | ALLOW_OCTALS)));
-  CHECK(isnan(StringToDouble(&uc, "07.8", ALLOW_HEX | ALLOW_OCTALS)));
-  CHECK(isnan(StringToDouble(&uc, "07e8", ALLOW_HEX | ALLOW_OCTALS)));
-  CHECK(isnan(StringToDouble(&uc, "07e7", ALLOW_HEX | ALLOW_OCTALS)));
+  CHECK(std::isnan(StringToDouble(&uc, "07.7", ALLOW_HEX | ALLOW_OCTALS)));
+  CHECK(std::isnan(StringToDouble(&uc, "07.8", ALLOW_HEX | ALLOW_OCTALS)));
+  CHECK(std::isnan(StringToDouble(&uc, "07e8", ALLOW_HEX | ALLOW_OCTALS)));
+  CHECK(std::isnan(StringToDouble(&uc, "07e7", ALLOW_HEX | ALLOW_OCTALS)));
 
   CHECK_EQ(8.7, StringToDouble(&uc, "08.7", ALLOW_HEX | ALLOW_OCTALS));
   CHECK_EQ(8e7, StringToDouble(&uc, "08e7", ALLOW_HEX | ALLOW_OCTALS));
@@ -123,9 +123,9 @@ TEST(TrailingJunk) {
 
 TEST(NonStrDecimalLiteral) {
   UnicodeCache uc;
-  CHECK(isnan(StringToDouble(&uc, " ", NO_FLAGS, OS::nan_value())));
-  CHECK(isnan(StringToDouble(&uc, "", NO_FLAGS, OS::nan_value())));
-  CHECK(isnan(StringToDouble(&uc, " ", NO_FLAGS, OS::nan_value())));
+  CHECK(std::isnan(StringToDouble(&uc, " ", NO_FLAGS, OS::nan_value())));
+  CHECK(std::isnan(StringToDouble(&uc, "", NO_FLAGS, OS::nan_value())));
+  CHECK(std::isnan(StringToDouble(&uc, " ", NO_FLAGS, OS::nan_value())));
   CHECK_EQ(0.0, StringToDouble(&uc, "", NO_FLAGS));
   CHECK_EQ(0.0, StringToDouble(&uc, " ", NO_FLAGS));
 }
@@ -140,8 +140,8 @@ TEST(IntegerStrLiteral) {
   CHECK_EQ(-1.0, StringToDouble(&uc, "-1", NO_FLAGS));
   CHECK_EQ(-1.0, StringToDouble(&uc, "  -1  ", NO_FLAGS));
   CHECK_EQ(1.0, StringToDouble(&uc, "  +1  ", NO_FLAGS));
-  CHECK(isnan(StringToDouble(&uc, "  -  1  ", NO_FLAGS)));
-  CHECK(isnan(StringToDouble(&uc, "  +  1  ", NO_FLAGS)));
+  CHECK(std::isnan(StringToDouble(&uc, "  -  1  ", NO_FLAGS)));
+  CHECK(std::isnan(StringToDouble(&uc, "  +  1  ", NO_FLAGS)));
 
   CHECK_EQ(0.0, StringToDouble(&uc, "0e0", ALLOW_HEX | ALLOW_OCTALS));
   CHECK_EQ(0.0, StringToDouble(&uc, "0e1", ALLOW_HEX | ALLOW_OCTALS));
@@ -249,6 +249,7 @@ TEST(ExponentNumberStr) {
   CHECK_EQ(1e-106, StringToDouble(&uc, ".000001e-100", NO_FLAGS));
 }
 
+
 class OneBit1: public BitField<uint32_t, 0, 1> {};
 class OneBit2: public BitField<uint32_t, 7, 1> {};
 class EightBit1: public BitField<uint32_t, 0, 8> {};
@@ -285,4 +286,22 @@ TEST(BitField) {
   }
   CHECK(!EightBit1::is_valid(256));
   CHECK(!EightBit2::is_valid(256));
+}
+
+
+class UpperBits: public BitField64<int, 61, 3> {};
+class MiddleBits: public BitField64<int, 31, 2> {};
+
+TEST(BitField64) {
+  uint64_t x;
+
+  // Test most significant bits.
+  x = V8_2PART_UINT64_C(0xE0000000, 00000000);
+  CHECK(x == UpperBits::encode(7));
+  CHECK_EQ(7, UpperBits::decode(x));
+
+  // Test the 32/64-bit boundary bits.
+  x = V8_2PART_UINT64_C(0x00000001, 80000000);
+  CHECK(x == MiddleBits::encode(3));
+  CHECK_EQ(3, MiddleBits::decode(x));
 }

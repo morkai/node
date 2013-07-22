@@ -92,7 +92,7 @@ class FullCodeGenerator: public AstVisitor {
         bailout_entries_(info->HasDeoptimizationSupport()
                          ? info->function()->ast_node_count() : 0,
                          info->zone()),
-        stack_checks_(2, info->zone()),  // There's always at least one.
+        back_edges_(2, info->zone()),
         type_feedback_cells_(info->HasDeoptimizationSupport()
                              ? info->function()->ast_node_count() : 0,
                              info->zone()),
@@ -123,18 +123,20 @@ class FullCodeGenerator: public AstVisitor {
 
   static const int kMaxBackEdgeWeight = 127;
 
+  // Platform-specific code size multiplier.
 #if V8_TARGET_ARCH_IA32
-  static const int kBackEdgeDistanceUnit = 100;
+  static const int kCodeSizeMultiplier = 100;
 #elif V8_TARGET_ARCH_X64
-  static const int kBackEdgeDistanceUnit = 162;
+  static const int kCodeSizeMultiplier = 162;
 #elif V8_TARGET_ARCH_ARM
-  static const int kBackEdgeDistanceUnit = 142;
+  static const int kCodeSizeMultiplier = 142;
 #elif V8_TARGET_ARCH_MIPS
-  static const int kBackEdgeDistanceUnit = 142;
+  static const int kCodeSizeMultiplier = 142;
 #else
 #error Unsupported target architecture.
 #endif
 
+  static const int kBackEdgeEntrySize = 2 * kIntSize + kOneByteSize;
 
  private:
   class Breakable;
@@ -330,7 +332,7 @@ class FullCodeGenerator: public AstVisitor {
 
   // Helper function to split control flow and avoid a branch to the
   // fall-through label if it is set up.
-#ifdef V8_TARGET_ARCH_MIPS
+#if V8_TARGET_ARCH_MIPS
   void Split(Condition cc,
              Register lhs,
              const Operand&  rhs,
@@ -409,6 +411,11 @@ class FullCodeGenerator: public AstVisitor {
   // this has to be a separate pass _before_ populating or executing any module.
   void AllocateModules(ZoneList<Declaration*>* declarations);
 
+  // Generate code to create an iterator result object.  The "value" property is
+  // set to a value popped from the stack, and "done" is set according to the
+  // argument.  The result object is left in the result register.
+  void EmitCreateIteratorResult(bool done);
+
   // Try to perform a comparison as a fast inlined literal compare if
   // the operands allow it.  Returns true if the compare operations
   // has been matched and all code generated; false otherwise.
@@ -431,8 +438,7 @@ class FullCodeGenerator: public AstVisitor {
 
   // Cache cell support.  This associates AST ids with global property cells
   // that will be cleared during GC and collected by the type-feedback oracle.
-  void RecordTypeFeedbackCell(TypeFeedbackId id,
-                              Handle<JSGlobalPropertyCell> cell);
+  void RecordTypeFeedbackCell(TypeFeedbackId id, Handle<Cell> cell);
 
   // Record a call's return site offset, used to rebuild the frame if the
   // called function was inlined at the site.
@@ -459,12 +465,17 @@ class FullCodeGenerator: public AstVisitor {
                                Label* back_edge_target);
   // Record the OSR AST id corresponding to a back edge in the code.
   void RecordBackEdge(BailoutId osr_ast_id);
-  // Emit a table of stack check ids and pcs into the code stream.  Return
-  // the offset of the start of the table.
-  unsigned EmitStackCheckTable();
+  // Emit a table of back edge ids, pcs and loop depths into the code stream.
+  // Return the offset of the start of the table.
+  unsigned EmitBackEdgeTable();
 
   void EmitProfilingCounterDecrement(int delta);
   void EmitProfilingCounterReset();
+
+  // Emit code to pop values from the stack associated with nested statements
+  // like try/catch, try/finally, etc, running the finallies and unwinding the
+  // handlers as needed.
+  void EmitUnwindBeforeReturn();
 
   // Platform-specific return sequence
   void EmitReturnSequence();
@@ -484,6 +495,16 @@ class FullCodeGenerator: public AstVisitor {
   INLINE_FUNCTION_LIST(EMIT_INLINE_RUNTIME_CALL)
   INLINE_RUNTIME_FUNCTION_LIST(EMIT_INLINE_RUNTIME_CALL)
 #undef EMIT_INLINE_RUNTIME_CALL
+
+  void EmitSeqStringSetCharCheck(Register string,
+                                 Register index,
+                                 Register value,
+                                 uint32_t encoding_mask);
+
+  // Platform-specific code for resuming generators.
+  void EmitGeneratorResume(Expression *generator,
+                           Expression *value,
+                           JSGeneratorObject::ResumeMode resume_mode);
 
   // Platform-specific code for loading variables.
   void EmitLoadGlobalCheckExtensions(Variable* var,
@@ -624,9 +645,15 @@ class FullCodeGenerator: public AstVisitor {
     unsigned pc_and_state;
   };
 
+  struct BackEdgeEntry {
+    BailoutId id;
+    unsigned pc;
+    uint8_t loop_depth;
+  };
+
   struct TypeFeedbackCellEntry {
     TypeFeedbackId ast_id;
-    Handle<JSGlobalPropertyCell> cell;
+    Handle<Cell> cell;
   };
 
 
@@ -818,13 +845,11 @@ class FullCodeGenerator: public AstVisitor {
   const ExpressionContext* context_;
   ZoneList<BailoutEntry> bailout_entries_;
   GrowableBitVector prepared_bailout_ids_;
-  // TODO(svenpanne) Rename this to something like back_edges_ and rename
-  // related functions accordingly.
-  ZoneList<BailoutEntry> stack_checks_;
+  ZoneList<BackEdgeEntry> back_edges_;
   ZoneList<TypeFeedbackCellEntry> type_feedback_cells_;
   int ic_total_count_;
   Handle<FixedArray> handler_table_;
-  Handle<JSGlobalPropertyCell> profiling_counter_;
+  Handle<Cell> profiling_counter_;
   bool generate_debug_code_;
   Zone* zone_;
 

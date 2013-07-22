@@ -31,6 +31,8 @@ var kMessages = {
   // Error
   cyclic_proto:                  ["Cyclic __proto__ value"],
   code_gen_from_strings:         ["%0"],
+  generator_running:             ["Generator is already running"],
+  generator_finished:            ["Generator has already finished"],
   // TypeError
   unexpected_token:              ["Unexpected token ", "%0"],
   unexpected_token_number:       ["Unexpected number"],
@@ -96,14 +98,39 @@ var kMessages = {
   observe_non_object:            ["Object.", "%0", " cannot ", "%0", " non-object"],
   observe_non_function:          ["Object.", "%0", " cannot deliver to non-function"],
   observe_callback_frozen:       ["Object.observe cannot deliver to a frozen function object"],
+  observe_invalid_accept:        ["Object.observe accept must be an array of strings."],
   observe_type_non_string:       ["Invalid changeRecord with non-string 'type' property"],
+  observe_perform_non_string:    ["Invalid non-string changeType"],
+  observe_perform_non_function:  ["Cannot perform non-function"],
   observe_notify_non_notifier:   ["notify called on non-notifier object"],
+  proto_poison_pill:             ["Generic use of __proto__ accessor not allowed"],
+  parameterless_typed_array_constr:
+                                 ["%0"," constructor should have at least one argument."],
+  not_typed_array:               ["this is not a typed array."],
+  invalid_argument:              ["invalid_argument"],
+  data_view_not_array_buffer:    ["First argument to DataView constructor must be an ArrayBuffer"],
+  constructor_not_function:      ["Constructor ", "%0", " requires 'new'"],
   // RangeError
   invalid_array_length:          ["Invalid array length"],
+  invalid_array_buffer_length:   ["Invalid array buffer length"],
+  invalid_typed_array_offset:    ["Start offset is too large:"],
+  invalid_typed_array_length:    ["Invalid typed array length"],
+  invalid_typed_array_alignment: ["%0", "of", "%1", "should be a multiple of", "%3"],
+  typed_array_set_source_too_large:
+                                 ["Source is too large"],
+  typed_array_set_negative_offset:
+                                 ["Start offset is negative"],
+  invalid_data_view_offset:      ["Start offset is outside the bounds of the buffer"],
+  invalid_data_view_length:      ["Invalid data view length"],
+  invalid_data_view_accessor_offset:
+                                 ["Offset is outside the bounds of the DataView"],
+
   stack_overflow:                ["Maximum call stack size exceeded"],
   invalid_time_value:            ["Invalid time value"],
   // SyntaxError
-  unable_to_parse:               ["Parse error"],
+  paren_in_arg_string:           ["Function arg string contains parenthesis"],
+  not_isvar:                     ["builtin %IS_VAR: not a variable"],
+  single_function_literal:       ["Single function literal required"],
   invalid_regexp_flags:          ["Invalid flags supplied to RegExp constructor '", "%0", "'"],
   invalid_regexp:                ["Invalid RegExp pattern /", "%0", "/"],
   illegal_break:                 ["Illegal break statement"],
@@ -150,9 +177,10 @@ var kMessages = {
   cant_prevent_ext_external_array_elements: ["Cannot prevent extension of an object with external array elements"],
   redef_external_array_element:  ["Cannot redefine a property of an object with external array elements"],
   harmony_const_assign:          ["Assignment to constant variable."],
+  symbol_to_string:              ["Conversion from symbol to string"],
   invalid_module_path:           ["Module does not export '", "%0", "', or export is not itself a module"],
   module_type_error:             ["Module '", "%0", "' used improperly"],
-  module_export_undefined:       ["Export '", "%0", "' is not defined in module"],
+  module_export_undefined:       ["Export '", "%0", "' is not defined in module"]
 };
 
 
@@ -524,11 +552,11 @@ function ScriptLineCount() {
  * If sourceURL comment is available and script starts at zero returns sourceURL
  * comment contents. Otherwise, script name is returned. See
  * http://fbug.googlecode.com/svn/branches/firebug1.1/docs/ReleaseNotes_1.1.txt
- * for details on using //@ sourceURL comment to identify scritps that don't
- * have name.
+ * and Source Map Revision 3 proposal for details on using //# sourceURL and
+ * deprecated //@ sourceURL comment to identify scripts that don't have name.
  *
- * @return {?string} script name if present, value for //@ sourceURL comment
- * otherwise.
+ * @return {?string} script name if present, value for //# sourceURL or
+ * deprecated //@ sourceURL comment otherwise.
  */
 function ScriptNameOrSourceURL() {
   if (this.line_offset > 0 || this.column_offset > 0) {
@@ -553,7 +581,7 @@ function ScriptNameOrSourceURL() {
   this.cachedNameOrSourceURL = this.name;
   if (sourceUrlPos > 4) {
     var sourceUrlPattern =
-        /\/\/@[\040\t]sourceURL=[\040\t]*([^\s\'\"]*)[\040\t]*$/gm;
+        /\/\/[#@][\040\t]sourceURL=[\040\t]*([^\s\'\"]*)[\040\t]*$/gm;
     // Don't reuse lastMatchInfo here, so we create a new array with room
     // for four captures (array with length one longer than the index
     // of the fourth capture, where the numbering is zero-based).
@@ -745,64 +773,70 @@ function GetPositionInLine(message) {
 
 
 function GetStackTraceLine(recv, fun, pos, isGlobal) {
-  return new CallSite(recv, fun, pos).toString();
+  return new CallSite(recv, fun, pos, false).toString();
 }
 
 // ----------------------------------------------------------------------------
 // Error implementation
 
-function CallSite(receiver, fun, pos) {
-  this.receiver = receiver;
-  this.fun = fun;
-  this.pos = pos;
+var CallSiteReceiverKey = %CreateSymbol("receiver");
+var CallSiteFunctionKey = %CreateSymbol("function");
+var CallSitePositionKey = %CreateSymbol("position");
+var CallSiteStrictModeKey = %CreateSymbol("strict mode");
+
+function CallSite(receiver, fun, pos, strict_mode) {
+  this[CallSiteReceiverKey] = receiver;
+  this[CallSiteFunctionKey] = fun;
+  this[CallSitePositionKey] = pos;
+  this[CallSiteStrictModeKey] = strict_mode;
 }
 
 function CallSiteGetThis() {
-  return this.receiver;
+  return this[CallSiteStrictModeKey] ? void 0 : this[CallSiteReceiverKey];
 }
 
 function CallSiteGetTypeName() {
-  return GetTypeName(this, false);
+  return GetTypeName(this[CallSiteReceiverKey], false);
 }
 
 function CallSiteIsToplevel() {
-  if (this.receiver == null) {
+  if (this[CallSiteReceiverKey] == null) {
     return true;
   }
-  return IS_GLOBAL(this.receiver);
+  return IS_GLOBAL(this[CallSiteReceiverKey]);
 }
 
 function CallSiteIsEval() {
-  var script = %FunctionGetScript(this.fun);
+  var script = %FunctionGetScript(this[CallSiteFunctionKey]);
   return script && script.compilation_type == COMPILATION_TYPE_EVAL;
 }
 
 function CallSiteGetEvalOrigin() {
-  var script = %FunctionGetScript(this.fun);
+  var script = %FunctionGetScript(this[CallSiteFunctionKey]);
   return FormatEvalOrigin(script);
 }
 
 function CallSiteGetScriptNameOrSourceURL() {
-  var script = %FunctionGetScript(this.fun);
+  var script = %FunctionGetScript(this[CallSiteFunctionKey]);
   return script ? script.nameOrSourceURL() : null;
 }
 
 function CallSiteGetFunction() {
-  return this.fun;
+  return this[CallSiteStrictModeKey] ? void 0 : this[CallSiteFunctionKey];
 }
 
 function CallSiteGetFunctionName() {
   // See if the function knows its own name
-  var name = this.fun.name;
+  var name = this[CallSiteFunctionKey].name;
   if (name) {
     return name;
   }
-  name = %FunctionGetInferredName(this.fun);
+  name = %FunctionGetInferredName(this[CallSiteFunctionKey]);
   if (name) {
     return name;
   }
   // Maybe this is an evaluation?
-  var script = %FunctionGetScript(this.fun);
+  var script = %FunctionGetScript(this[CallSiteFunctionKey]);
   if (script && script.compilation_type == COMPILATION_TYPE_EVAL) {
     return "eval";
   }
@@ -812,26 +846,22 @@ function CallSiteGetFunctionName() {
 function CallSiteGetMethodName() {
   // See if we can find a unique property on the receiver that holds
   // this function.
-  var ownName = this.fun.name;
-  if (ownName && this.receiver &&
-      (%_CallFunction(this.receiver,
-                      ownName,
-                      ObjectLookupGetter) === this.fun ||
-       %_CallFunction(this.receiver,
-                      ownName,
-                      ObjectLookupSetter) === this.fun ||
-       (IS_OBJECT(this.receiver) &&
-        %GetDataProperty(this.receiver, ownName) === this.fun))) {
+  var receiver = this[CallSiteReceiverKey];
+  var fun = this[CallSiteFunctionKey];
+  var ownName = fun.name;
+  if (ownName && receiver &&
+      (%_CallFunction(receiver, ownName, ObjectLookupGetter) === fun ||
+       %_CallFunction(receiver, ownName, ObjectLookupSetter) === fun ||
+       (IS_OBJECT(receiver) && %GetDataProperty(receiver, ownName) === fun))) {
     // To handle DontEnum properties we guess that the method has
     // the same name as the function.
     return ownName;
   }
   var name = null;
-  for (var prop in this.receiver) {
-    if (%_CallFunction(this.receiver, prop, ObjectLookupGetter) === this.fun ||
-        %_CallFunction(this.receiver, prop, ObjectLookupSetter) === this.fun ||
-        (IS_OBJECT(this.receiver) &&
-         %GetDataProperty(this.receiver, prop) === this.fun)) {
+  for (var prop in receiver) {
+    if (%_CallFunction(receiver, prop, ObjectLookupGetter) === fun ||
+        %_CallFunction(receiver, prop, ObjectLookupSetter) === fun ||
+        (IS_OBJECT(receiver) && %GetDataProperty(receiver, prop) === fun)) {
       // If we find more than one match bail out to avoid confusion.
       if (name) {
         return null;
@@ -846,49 +876,49 @@ function CallSiteGetMethodName() {
 }
 
 function CallSiteGetFileName() {
-  var script = %FunctionGetScript(this.fun);
+  var script = %FunctionGetScript(this[CallSiteFunctionKey]);
   return script ? script.name : null;
 }
 
 function CallSiteGetLineNumber() {
-  if (this.pos == -1) {
+  if (this[CallSitePositionKey] == -1) {
     return null;
   }
-  var script = %FunctionGetScript(this.fun);
+  var script = %FunctionGetScript(this[CallSiteFunctionKey]);
   var location = null;
   if (script) {
-    location = script.locationFromPosition(this.pos, true);
+    location = script.locationFromPosition(this[CallSitePositionKey], true);
   }
   return location ? location.line + 1 : null;
 }
 
 function CallSiteGetColumnNumber() {
-  if (this.pos == -1) {
+  if (this[CallSitePositionKey] == -1) {
     return null;
   }
-  var script = %FunctionGetScript(this.fun);
+  var script = %FunctionGetScript(this[CallSiteFunctionKey]);
   var location = null;
   if (script) {
-    location = script.locationFromPosition(this.pos, true);
+    location = script.locationFromPosition(this[CallSitePositionKey], true);
   }
   return location ? location.column + 1: null;
 }
 
 function CallSiteIsNative() {
-  var script = %FunctionGetScript(this.fun);
+  var script = %FunctionGetScript(this[CallSiteFunctionKey]);
   return script ? (script.type == TYPE_NATIVE) : false;
 }
 
 function CallSiteGetPosition() {
-  return this.pos;
+  return this[CallSitePositionKey];
 }
 
 function CallSiteIsConstructor() {
-  var receiver = this.receiver;
-  var constructor =
-      IS_OBJECT(receiver) ? %GetDataProperty(receiver, "constructor") : null;
+  var receiver = this[CallSiteReceiverKey];
+  var constructor = (receiver != null && IS_OBJECT(receiver))
+                        ? %GetDataProperty(receiver, "constructor") : null;
   if (!constructor) return false;
-  return this.fun === constructor;
+  return this[CallSiteFunctionKey] === constructor;
 }
 
 function CallSiteToString() {
@@ -931,7 +961,7 @@ function CallSiteToString() {
   var isConstructor = this.isConstructor();
   var isMethodCall = !(this.isToplevel() || isConstructor);
   if (isMethodCall) {
-    var typeName = GetTypeName(this, true);
+    var typeName = GetTypeName(this[CallSiteReceiverKey], true);
     var methodName = this.getMethodName();
     if (functionName) {
       if (typeName &&
@@ -1035,13 +1065,15 @@ function FormatErrorString(error) {
 
 function GetStackFrames(raw_stack) {
   var frames = new InternalArray();
-  for (var i = 0; i < raw_stack.length; i += 4) {
+  var non_strict_frames = raw_stack[0];
+  for (var i = 1; i < raw_stack.length; i += 4) {
     var recv = raw_stack[i];
     var fun = raw_stack[i + 1];
     var code = raw_stack[i + 2];
     var pc = raw_stack[i + 3];
     var pos = %FunctionGetPositionForOffset(code, pc);
-    frames.push(new CallSite(recv, fun, pos));
+    non_strict_frames--;
+    frames.push(new CallSite(recv, fun, pos, (non_strict_frames < 0)));
   }
   return frames;
 }
@@ -1069,16 +1101,16 @@ function FormatStackTrace(error_string, frames) {
 }
 
 
-function GetTypeName(obj, requireConstructor) {
-  var constructor = obj.receiver.constructor;
+function GetTypeName(receiver, requireConstructor) {
+  var constructor = receiver.constructor;
   if (!constructor) {
     return requireConstructor ? null :
-        %_CallFunction(obj.receiver, ObjectToString);
+        %_CallFunction(receiver, ObjectToString);
   }
   var constructorName = constructor.name;
   if (!constructorName) {
     return requireConstructor ? null :
-        %_CallFunction(obj.receiver, ObjectToString);
+        %_CallFunction(receiver, ObjectToString);
   }
   return constructorName;
 }

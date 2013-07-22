@@ -159,8 +159,8 @@ MaybeObject* Heap::AllocateOneByteInternalizedString(Vector<const uint8_t> str,
   ASSERT_EQ(size, answer->Size());
 
   // Fill in the characters.
-  memcpy(answer->address() + SeqOneByteString::kHeaderSize,
-         str.start(), str.length());
+  OS::MemCopy(answer->address() + SeqOneByteString::kHeaderSize,
+              str.start(), str.length());
 
   return answer;
 }
@@ -192,8 +192,8 @@ MaybeObject* Heap::AllocateTwoByteInternalizedString(Vector<const uc16> str,
   ASSERT_EQ(size, answer->Size());
 
   // Fill in the characters.
-  memcpy(answer->address() + SeqTwoByteString::kHeaderSize,
-         str.start(), str.length() * kUC16Size);
+  OS::MemCopy(answer->address() + SeqTwoByteString::kHeaderSize,
+              str.start(), str.length() * kUC16Size);
 
   return answer;
 }
@@ -211,7 +211,7 @@ MaybeObject* Heap::CopyFixedDoubleArray(FixedDoubleArray* src) {
 MaybeObject* Heap::AllocateRaw(int size_in_bytes,
                                AllocationSpace space,
                                AllocationSpace retry_space) {
-  ASSERT(allocation_allowed_ && gc_state_ == NOT_IN_GC);
+  ASSERT(AllowHandleAllocation::IsAllowed() && gc_state_ == NOT_IN_GC);
   ASSERT(space != NEW_SPACE ||
          retry_space == OLD_POINTER_SPACE ||
          retry_space == OLD_DATA_SPACE ||
@@ -245,6 +245,8 @@ MaybeObject* Heap::AllocateRaw(int size_in_bytes,
     result = lo_space_->AllocateRaw(size_in_bytes, NOT_EXECUTABLE);
   } else if (CELL_SPACE == space) {
     result = cell_space_->AllocateRaw(size_in_bytes);
+  } else if (PROPERTY_CELL_SPACE == space) {
+    result = property_cell_space_->AllocateRaw(size_in_bytes);
   } else {
     ASSERT(MAP_SPACE == space);
     result = map_space_->AllocateRaw(size_in_bytes);
@@ -305,7 +307,19 @@ MaybeObject* Heap::AllocateRawCell() {
   isolate_->counters()->objs_since_last_full()->Increment();
   isolate_->counters()->objs_since_last_young()->Increment();
 #endif
-  MaybeObject* result = cell_space_->AllocateRaw(JSGlobalPropertyCell::kSize);
+  MaybeObject* result = cell_space_->AllocateRaw(Cell::kSize);
+  if (result->IsFailure()) old_gen_exhausted_ = true;
+  return result;
+}
+
+
+MaybeObject* Heap::AllocateRawPropertyCell() {
+#ifdef DEBUG
+  isolate_->counters()->objs_since_last_full()->Increment();
+  isolate_->counters()->objs_since_last_young()->Increment();
+#endif
+  MaybeObject* result =
+      property_cell_space_->AllocateRaw(PropertyCell::kSize);
   if (result->IsFailure()) old_gen_exhausted_ = true;
   return result;
 }
@@ -342,6 +356,16 @@ bool Heap::InOldPointerSpace(Address address) {
 
 bool Heap::InOldPointerSpace(Object* object) {
   return InOldPointerSpace(reinterpret_cast<Address>(object));
+}
+
+
+bool Heap::InOldDataSpace(Address address) {
+  return old_data_space_->Contains(address);
+}
+
+
+bool Heap::InOldDataSpace(Object* object) {
+  return InOldDataSpace(reinterpret_cast<Address>(object));
 }
 
 
@@ -397,9 +421,12 @@ AllocationSpace Heap::TargetSpaceId(InstanceType type) {
   ASSERT(type != MAP_TYPE);
   ASSERT(type != CODE_TYPE);
   ASSERT(type != ODDBALL_TYPE);
-  ASSERT(type != JS_GLOBAL_PROPERTY_CELL_TYPE);
+  ASSERT(type != CELL_TYPE);
+  ASSERT(type != PROPERTY_CELL_TYPE);
 
-  if (type < FIRST_NONSTRING_TYPE) {
+  if (type <= LAST_NAME_TYPE) {
+    if (type == SYMBOL_TYPE) return OLD_POINTER_SPACE;
+    ASSERT(type < FIRST_NONSTRING_TYPE);
     // There are four string representations: sequential strings, external
     // strings, cons strings, and sliced strings.
     // Only the latter two contain non-map-word pointers to heap objects.
@@ -415,7 +442,7 @@ AllocationSpace Heap::TargetSpaceId(InstanceType type) {
 void Heap::CopyBlock(Address dst, Address src, int byte_size) {
   CopyWords(reinterpret_cast<Object**>(dst),
             reinterpret_cast<Object**>(src),
-            byte_size / kPointerSize);
+            static_cast<size_t>(byte_size / kPointerSize));
 }
 
 
@@ -433,7 +460,7 @@ void Heap::MoveBlock(Address dst, Address src, int byte_size) {
       *dst_slot++ = *src_slot++;
     }
   } else {
-    memmove(dst, src, byte_size);
+    OS::MemMove(dst, src, static_cast<size_t>(byte_size));
   }
 }
 
@@ -523,7 +550,7 @@ intptr_t Heap::AdjustAmountOfExternalAllocatedMemory(
     if (amount >= 0) {
       amount_of_external_allocated_memory_ = amount;
     } else {
-      // Give up and reset the counters in case of an overflow.
+      // Give up and reset the counters in case of an underflow.
       amount_of_external_allocated_memory_ = 0;
       amount_of_external_allocated_memory_at_last_global_gc_ = 0;
     }
@@ -531,17 +558,15 @@ intptr_t Heap::AdjustAmountOfExternalAllocatedMemory(
   if (FLAG_trace_external_memory) {
     PrintPID("%8.0f ms: ", isolate()->time_millis_since_init());
     PrintF("Adjust amount of external memory: delta=%6" V8_PTR_PREFIX "d KB, "
-           " amount=%6" V8_PTR_PREFIX "d KB, isolate=0x%08" V8PRIxPTR ".\n",
-           change_in_bytes / 1024, amount_of_external_allocated_memory_ / 1024,
+           "amount=%6" V8_PTR_PREFIX "d KB, since_gc=%6" V8_PTR_PREFIX "d KB, "
+           "isolate=0x%08" V8PRIxPTR ".\n",
+           change_in_bytes / KB,
+           amount_of_external_allocated_memory_ / KB,
+           PromotedExternalMemorySize() / KB,
            reinterpret_cast<intptr_t>(isolate()));
   }
   ASSERT(amount_of_external_allocated_memory_ >= 0);
   return amount_of_external_allocated_memory_;
-}
-
-
-void Heap::SetLastScriptId(Object* last_script_id) {
-  roots_[kLastScriptIdRootIndex] = last_script_id;
 }
 
 
@@ -565,61 +590,68 @@ Isolate* Heap::isolate() {
 // Warning: Do not use the identifiers __object__, __maybe_object__ or
 // __scope__ in a call to this macro.
 
-#define CALL_AND_RETRY(ISOLATE, FUNCTION_CALL, RETURN_VALUE, RETURN_EMPTY)\
-  do {                                                                    \
-    GC_GREEDY_CHECK();                                                    \
-    MaybeObject* __maybe_object__ = FUNCTION_CALL;                        \
-    Object* __object__ = NULL;                                            \
-    if (__maybe_object__->ToObject(&__object__)) RETURN_VALUE;            \
-    if (__maybe_object__->IsOutOfMemory()) {                              \
-      v8::internal::V8::FatalProcessOutOfMemory("CALL_AND_RETRY_0", true);\
-    }                                                                     \
-    if (!__maybe_object__->IsRetryAfterGC()) RETURN_EMPTY;                \
-    ISOLATE->heap()->CollectGarbage(Failure::cast(__maybe_object__)->     \
-                                    allocation_space(),                   \
-                                    "allocation failure");                \
-    __maybe_object__ = FUNCTION_CALL;                                     \
-    if (__maybe_object__->ToObject(&__object__)) RETURN_VALUE;            \
-    if (__maybe_object__->IsOutOfMemory()) {                              \
-      v8::internal::V8::FatalProcessOutOfMemory("CALL_AND_RETRY_1", true);\
-    }                                                                     \
-    if (!__maybe_object__->IsRetryAfterGC()) RETURN_EMPTY;                \
-    ISOLATE->counters()->gc_last_resort_from_handles()->Increment();      \
-    ISOLATE->heap()->CollectAllAvailableGarbage("last resort gc");        \
-    {                                                                     \
-      AlwaysAllocateScope __scope__;                                      \
-      __maybe_object__ = FUNCTION_CALL;                                   \
-    }                                                                     \
-    if (__maybe_object__->ToObject(&__object__)) RETURN_VALUE;            \
-    if (__maybe_object__->IsOutOfMemory() ||                              \
-        __maybe_object__->IsRetryAfterGC()) {                             \
-      /* TODO(1181417): Fix this. */                                      \
-      v8::internal::V8::FatalProcessOutOfMemory("CALL_AND_RETRY_2", true);\
-    }                                                                     \
-    RETURN_EMPTY;                                                         \
+#define CALL_AND_RETRY(ISOLATE, FUNCTION_CALL, RETURN_VALUE, RETURN_EMPTY, OOM)\
+  do {                                                                         \
+    GC_GREEDY_CHECK();                                                         \
+    MaybeObject* __maybe_object__ = FUNCTION_CALL;                             \
+    Object* __object__ = NULL;                                                 \
+    if (__maybe_object__->ToObject(&__object__)) RETURN_VALUE;                 \
+    if (__maybe_object__->IsOutOfMemory()) {                                   \
+      OOM;                                                                     \
+    }                                                                          \
+    if (!__maybe_object__->IsRetryAfterGC()) RETURN_EMPTY;                     \
+    ISOLATE->heap()->CollectGarbage(Failure::cast(__maybe_object__)->          \
+                                    allocation_space(),                        \
+                                    "allocation failure");                     \
+    __maybe_object__ = FUNCTION_CALL;                                          \
+    if (__maybe_object__->ToObject(&__object__)) RETURN_VALUE;                 \
+    if (__maybe_object__->IsOutOfMemory()) {                                   \
+      OOM;                                                                     \
+    }                                                                          \
+    if (!__maybe_object__->IsRetryAfterGC()) RETURN_EMPTY;                     \
+    ISOLATE->counters()->gc_last_resort_from_handles()->Increment();           \
+    ISOLATE->heap()->CollectAllAvailableGarbage("last resort gc");             \
+    {                                                                          \
+      AlwaysAllocateScope __scope__;                                           \
+      __maybe_object__ = FUNCTION_CALL;                                        \
+    }                                                                          \
+    if (__maybe_object__->ToObject(&__object__)) RETURN_VALUE;                 \
+    if (__maybe_object__->IsOutOfMemory()) {                                   \
+      OOM;                                                                     \
+    }                                                                          \
+    if (__maybe_object__->IsRetryAfterGC()) {                                  \
+      /* TODO(1181417): Fix this. */                                           \
+      v8::internal::V8::FatalProcessOutOfMemory("CALL_AND_RETRY_LAST", true);  \
+    }                                                                          \
+    RETURN_EMPTY;                                                              \
   } while (false)
 
+#define CALL_AND_RETRY_OR_DIE(                                             \
+     ISOLATE, FUNCTION_CALL, RETURN_VALUE, RETURN_EMPTY)                   \
+  CALL_AND_RETRY(                                                          \
+      ISOLATE,                                                             \
+      FUNCTION_CALL,                                                       \
+      RETURN_VALUE,                                                        \
+      RETURN_EMPTY,                                                        \
+      v8::internal::V8::FatalProcessOutOfMemory("CALL_AND_RETRY", true))
 
-#define CALL_HEAP_FUNCTION(ISOLATE, FUNCTION_CALL, TYPE)       \
-  CALL_AND_RETRY(ISOLATE,                                      \
-                 FUNCTION_CALL,                                \
-                 return Handle<TYPE>(TYPE::cast(__object__), ISOLATE),  \
-                 return Handle<TYPE>())
+#define CALL_HEAP_FUNCTION(ISOLATE, FUNCTION_CALL, TYPE)                      \
+  CALL_AND_RETRY_OR_DIE(ISOLATE,                                              \
+                        FUNCTION_CALL,                                        \
+                        return Handle<TYPE>(TYPE::cast(__object__), ISOLATE), \
+                        return Handle<TYPE>())                                \
 
 
-#define CALL_HEAP_FUNCTION_VOID(ISOLATE, FUNCTION_CALL) \
-  CALL_AND_RETRY(ISOLATE, FUNCTION_CALL, return, return)
+#define CALL_HEAP_FUNCTION_VOID(ISOLATE, FUNCTION_CALL)  \
+  CALL_AND_RETRY_OR_DIE(ISOLATE, FUNCTION_CALL, return, return)
 
 
-#ifdef DEBUG
-
-inline bool Heap::allow_allocation(bool new_state) {
-  bool old = allocation_allowed_;
-  allocation_allowed_ = new_state;
-  return old;
-}
-
-#endif
+#define CALL_HEAP_FUNCTION_PASS_EXCEPTION(ISOLATE, FUNCTION_CALL) \
+  CALL_AND_RETRY(ISOLATE,                                         \
+                 FUNCTION_CALL,                                   \
+                 return __object__,                               \
+                 return __maybe_object__,                         \
+                 return __maybe_object__)
 
 
 void ExternalStringTable::AddString(String* string) {
@@ -830,44 +862,6 @@ DisallowAllocationFailure::~DisallowAllocationFailure() {
   HEAP->disallow_allocation_failure_ = old_state_;
 #endif
 }
-
-
-#ifdef DEBUG
-AssertNoAllocation::AssertNoAllocation() {
-  Isolate* isolate = ISOLATE;
-  active_ = !isolate->optimizing_compiler_thread()->IsOptimizerThread();
-  if (active_) {
-    old_state_ = isolate->heap()->allow_allocation(false);
-  }
-}
-
-
-AssertNoAllocation::~AssertNoAllocation() {
-  if (active_) HEAP->allow_allocation(old_state_);
-}
-
-
-DisableAssertNoAllocation::DisableAssertNoAllocation() {
-  Isolate* isolate = ISOLATE;
-  active_ = !isolate->optimizing_compiler_thread()->IsOptimizerThread();
-  if (active_) {
-    old_state_ = isolate->heap()->allow_allocation(true);
-  }
-}
-
-
-DisableAssertNoAllocation::~DisableAssertNoAllocation() {
-  if (active_) HEAP->allow_allocation(old_state_);
-}
-
-#else
-
-AssertNoAllocation::AssertNoAllocation() { }
-AssertNoAllocation::~AssertNoAllocation() { }
-DisableAssertNoAllocation::DisableAssertNoAllocation() { }
-DisableAssertNoAllocation::~DisableAssertNoAllocation() { }
-
-#endif
 
 
 } }  // namespace v8::internal

@@ -27,8 +27,9 @@
 
 #include "v8.h"
 
-#if defined(V8_TARGET_ARCH_ARM)
+#if V8_TARGET_ARCH_ARM
 
+#include "cpu-profiler.h"
 #include "unicode.h"
 #include "log.h"
 #include "code-stubs.h"
@@ -122,7 +123,7 @@ RegExpMacroAssemblerARM::RegExpMacroAssemblerARM(
     int registers_to_save,
     Zone* zone)
     : NativeRegExpMacroAssembler(zone),
-      masm_(new MacroAssembler(Isolate::Current(), NULL, kRegExpCodeSize)),
+      masm_(new MacroAssembler(zone->isolate(), NULL, kRegExpCodeSize)),
       mode_(mode),
       num_registers_(registers_to_save),
       num_saved_registers_(registers_to_save),
@@ -235,54 +236,6 @@ void RegExpMacroAssemblerARM::CheckCharacterLT(uc16 limit, Label* on_less) {
 }
 
 
-void RegExpMacroAssemblerARM::CheckCharacters(Vector<const uc16> str,
-                                              int cp_offset,
-                                              Label* on_failure,
-                                              bool check_end_of_string) {
-  if (on_failure == NULL) {
-    // Instead of inlining a backtrack for each test, (re)use the global
-    // backtrack target.
-    on_failure = &backtrack_label_;
-  }
-
-  if (check_end_of_string) {
-    // Is last character of required match inside string.
-    CheckPosition(cp_offset + str.length() - 1, on_failure);
-  }
-
-  __ add(r0, end_of_input_address(), Operand(current_input_offset()));
-  if (cp_offset != 0) {
-    int byte_offset = cp_offset * char_size();
-    __ add(r0, r0, Operand(byte_offset));
-  }
-
-  // r0 : Address of characters to match against str.
-  int stored_high_byte = 0;
-  for (int i = 0; i < str.length(); i++) {
-    if (mode_ == ASCII) {
-      __ ldrb(r1, MemOperand(r0, char_size(), PostIndex));
-      ASSERT(str[i] <= String::kMaxOneByteCharCode);
-      __ cmp(r1, Operand(str[i]));
-    } else {
-      __ ldrh(r1, MemOperand(r0, char_size(), PostIndex));
-      uc16 match_char = str[i];
-      int match_high_byte = (match_char >> 8);
-      if (match_high_byte == 0) {
-        __ cmp(r1, Operand(str[i]));
-      } else {
-        if (match_high_byte != stored_high_byte) {
-          __ mov(r2, Operand(match_high_byte));
-          stored_high_byte = match_high_byte;
-        }
-        __ add(r3, r2, Operand(match_char & 0xff));
-        __ cmp(r1, r3);
-      }
-    }
-    BranchOrBacktrack(ne, on_failure);
-  }
-}
-
-
 void RegExpMacroAssemblerARM::CheckGreedyLoop(Label* on_equal) {
   __ ldr(r0, MemOperand(backtrack_stackpointer(), 0));
   __ cmp(current_input_offset(), r0);
@@ -380,12 +333,12 @@ void RegExpMacroAssemblerARM::CheckNotBackReferenceIgnoreCase(
     // Address of current input position.
     __ add(r1, current_input_offset(), Operand(end_of_input_address()));
     // Isolate.
-    __ mov(r3, Operand(ExternalReference::isolate_address()));
+    __ mov(r3, Operand(ExternalReference::isolate_address(isolate())));
 
     {
       AllowExternalCallThatCantCauseGC scope(masm_);
       ExternalReference function =
-          ExternalReference::re_case_insensitive_compare_uc16(masm_->isolate());
+          ExternalReference::re_case_insensitive_compare_uc16(isolate());
       __ CallCFunction(function, argument_count);
     }
 
@@ -556,7 +509,7 @@ bool RegExpMacroAssemblerARM::CheckSpecialCharacterClass(uc16 type,
   case 'd':
     // Match ASCII digits ('0'..'9')
     __ sub(r0, current_character(), Operand('0'));
-    __ cmp(current_character(), Operand('9' - '0'));
+    __ cmp(r0, Operand('9' - '0'));
     BranchOrBacktrack(hi, on_no_match);
     return true;
   case 'D':
@@ -682,7 +635,7 @@ Handle<HeapObject> RegExpMacroAssemblerARM::GetCode(Handle<String> source) {
   Label stack_ok;
 
   ExternalReference stack_limit =
-      ExternalReference::address_of_stack_limit(masm_->isolate());
+      ExternalReference::address_of_stack_limit(isolate());
   __ mov(r0, Operand(stack_limit));
   __ ldr(r0, MemOperand(r0));
   __ sub(r0, sp, r0, SetCC);
@@ -893,9 +846,9 @@ Handle<HeapObject> RegExpMacroAssemblerARM::GetCode(Handle<String> source) {
     __ PrepareCallCFunction(num_arguments, r0);
     __ mov(r0, backtrack_stackpointer());
     __ add(r1, frame_pointer(), Operand(kStackHighEnd));
-    __ mov(r2, Operand(ExternalReference::isolate_address()));
+    __ mov(r2, Operand(ExternalReference::isolate_address(isolate())));
     ExternalReference grow_stack =
-        ExternalReference::re_grow_stack(masm_->isolate());
+        ExternalReference::re_grow_stack(isolate());
     __ CallCFunction(grow_stack, num_arguments);
     // If return NULL, we have failed to grow the stack, and
     // must exit with a stack-overflow exception.
@@ -917,9 +870,8 @@ Handle<HeapObject> RegExpMacroAssemblerARM::GetCode(Handle<String> source) {
 
   CodeDesc code_desc;
   masm_->GetCode(&code_desc);
-  Handle<Code> code = FACTORY->NewCode(code_desc,
-                                       Code::ComputeFlags(Code::REGEXP),
-                                       masm_->CodeObject());
+  Handle<Code> code = isolate()->factory()->NewCode(
+      code_desc, Code::ComputeFlags(Code::REGEXP), masm_->CodeObject());
   PROFILE(Isolate::Current(), RegExpCodeCreateEvent(*code, *source));
   return Handle<HeapObject>::cast(code);
 }
@@ -1111,7 +1063,7 @@ void RegExpMacroAssemblerARM::CallCheckStackGuardState(Register scratch) {
   __ mov(r1, Operand(masm_->CodeObject()));
   // r0 becomes return address pointer.
   ExternalReference stack_guard_check =
-      ExternalReference::re_check_stack_guard_state(masm_->isolate());
+      ExternalReference::re_check_stack_guard_state(isolate());
   CallCFunctionUsingStub(stack_guard_check, num_arguments);
 }
 
@@ -1292,7 +1244,7 @@ void RegExpMacroAssemblerARM::Pop(Register target) {
 void RegExpMacroAssemblerARM::CheckPreemption() {
   // Check for preemption.
   ExternalReference stack_limit =
-      ExternalReference::address_of_stack_limit(masm_->isolate());
+      ExternalReference::address_of_stack_limit(isolate());
   __ mov(r0, Operand(stack_limit));
   __ ldr(r0, MemOperand(r0));
   __ cmp(sp, r0);
@@ -1302,7 +1254,7 @@ void RegExpMacroAssemblerARM::CheckPreemption() {
 
 void RegExpMacroAssemblerARM::CheckStackLimit() {
   ExternalReference stack_limit =
-      ExternalReference::address_of_regexp_stack_limit(masm_->isolate());
+      ExternalReference::address_of_regexp_stack_limit(isolate());
   __ mov(r0, Operand(stack_limit));
   __ ldr(r0, MemOperand(r0));
   __ cmp(backtrack_stackpointer(), Operand(r0));

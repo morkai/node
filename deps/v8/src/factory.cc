@@ -1,4 +1,4 @@
-// Copyright 2012 the V8 project authors. All rights reserved.
+// Copyright 2013 the V8 project authors. All rights reserved.
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are
 // met:
@@ -31,6 +31,7 @@
 #include "debug.h"
 #include "execution.h"
 #include "factory.h"
+#include "isolate-inl.h"
 #include "macro-assembler.h"
 #include "objects.h"
 #include "objects-visiting.h"
@@ -39,6 +40,14 @@
 
 namespace v8 {
 namespace internal {
+
+
+Handle<Box> Factory::NewBox(Handle<Object> value, PretenureFlag pretenure) {
+  CALL_HEAP_FUNCTION(
+      isolate(),
+      isolate()->heap()->AllocateBox(*value, pretenure),
+      Box);
+}
 
 
 Handle<FixedArray> Factory::NewFixedArray(int size, PretenureFlag pretenure) {
@@ -251,6 +260,32 @@ Handle<String> Factory::NewConsString(Handle<String> first,
 }
 
 
+template<typename SinkChar, typename StringType>
+Handle<String> ConcatStringContent(Handle<StringType> result,
+                                   Handle<String> first,
+                                   Handle<String> second) {
+  DisallowHeapAllocation pointer_stays_valid;
+  SinkChar* sink = result->GetChars();
+  String::WriteToFlat(*first, sink, 0, first->length());
+  String::WriteToFlat(*second, sink + first->length(), 0, second->length());
+  return result;
+}
+
+
+Handle<String> Factory::NewFlatConcatString(Handle<String> first,
+                                            Handle<String> second) {
+  int total_length = first->length() + second->length();
+  if (first->IsOneByteRepresentationUnderneath() &&
+      second->IsOneByteRepresentationUnderneath()) {
+    return ConcatStringContent<uint8_t>(
+        NewRawOneByteString(total_length), first, second);
+  } else {
+    return ConcatStringContent<uc16>(
+        NewRawTwoByteString(total_length), first, second);
+  }
+}
+
+
 Handle<String> Factory::NewSubString(Handle<String> str,
                                      int begin,
                                      int end) {
@@ -400,27 +435,17 @@ Handle<ExecutableAccessorInfo> Factory::NewExecutableAccessorInfo() {
 
 Handle<Script> Factory::NewScript(Handle<String> source) {
   // Generate id for this script.
-  int id;
   Heap* heap = isolate()->heap();
-  if (heap->last_script_id()->IsUndefined()) {
-    // Script ids start from one.
-    id = 1;
-  } else {
-    // Increment id, wrap when positive smi is exhausted.
-    id = Smi::cast(heap->last_script_id())->value();
-    id++;
-    if (!Smi::IsValid(id)) {
-      id = 0;
-    }
-  }
-  heap->SetLastScriptId(Smi::FromInt(id));
+  int id = heap->last_script_id()->value() + 1;
+  if (!Smi::IsValid(id) || id < 0) id = 1;
+  heap->set_last_script_id(Smi::FromInt(id));
 
   // Create and initialize script object.
   Handle<Foreign> wrapper = NewForeign(0, TENURED);
   Handle<Script> script = Handle<Script>::cast(NewStruct(SCRIPT_TYPE));
   script->set_source(*source);
   script->set_name(heap->undefined_value());
-  script->set_id(heap->last_script_id());
+  script->set_id(Smi::FromInt(id));
   script->set_line_offset(Smi::FromInt(0));
   script->set_column_offset(Smi::FromInt(0));
   script->set_data(heap->undefined_value());
@@ -474,12 +499,21 @@ Handle<ExternalArray> Factory::NewExternalArray(int length,
 }
 
 
-Handle<JSGlobalPropertyCell> Factory::NewJSGlobalPropertyCell(
-    Handle<Object> value) {
+Handle<Cell> Factory::NewCell(Handle<Object> value) {
+  AllowDeferredHandleDereference convert_to_cell;
   CALL_HEAP_FUNCTION(
       isolate(),
-      isolate()->heap()->AllocateJSGlobalPropertyCell(*value),
-      JSGlobalPropertyCell);
+      isolate()->heap()->AllocateCell(*value),
+      Cell);
+}
+
+
+Handle<PropertyCell> Factory::NewPropertyCell(Handle<Object> value) {
+  AllowDeferredHandleDereference convert_to_cell;
+  CALL_HEAP_FUNCTION(
+      isolate(),
+      isolate()->heap()->AllocatePropertyCell(*value),
+      PropertyCell);
 }
 
 
@@ -578,15 +612,22 @@ Handle<JSFunction> Factory::BaseNewFunctionFromSharedFunctionInfo(
 }
 
 
+static Handle<Map> MapForNewFunction(Isolate *isolate,
+                                     Handle<SharedFunctionInfo> function_info) {
+  Context *context = isolate->context()->native_context();
+  int map_index = Context::FunctionMapIndex(function_info->language_mode(),
+                                            function_info->is_generator());
+  return Handle<Map>(Map::cast(context->get(map_index)));
+}
+
+
 Handle<JSFunction> Factory::NewFunctionFromSharedFunctionInfo(
     Handle<SharedFunctionInfo> function_info,
     Handle<Context> context,
     PretenureFlag pretenure) {
   Handle<JSFunction> result = BaseNewFunctionFromSharedFunctionInfo(
       function_info,
-      function_info->is_classic_mode()
-          ? isolate()->function_map()
-          : isolate()->strict_mode_function_map(),
+      MapForNewFunction(isolate(), function_info),
       pretenure);
 
   if (function_info->ic_age() != isolate()->heap()->global_ic_age()) {
@@ -620,7 +661,8 @@ Handle<JSFunction> Factory::NewFunctionFromSharedFunctionInfo(
       result->is_compiled() &&
       !function_info->is_toplevel() &&
       function_info->allows_lazy_compilation() &&
-      !function_info->optimization_disabled()) {
+      !function_info->optimization_disabled() &&
+      !isolate()->DebuggerHasBreakPoints()) {
     result->MarkForLazyRecompilation();
   }
   return result;
@@ -651,6 +693,14 @@ Handle<Object> Factory::NewNumberFromUint(uint32_t value,
 }
 
 
+Handle<HeapNumber> Factory::NewHeapNumber(double value,
+                                          PretenureFlag pretenure) {
+  CALL_HEAP_FUNCTION(
+      isolate(),
+      isolate()->heap()->AllocateHeapNumber(value, pretenure), HeapNumber);
+}
+
+
 Handle<JSObject> Factory::NewNeanderObject() {
   CALL_HEAP_FUNCTION(
       isolate(),
@@ -660,9 +710,9 @@ Handle<JSObject> Factory::NewNeanderObject() {
 }
 
 
-Handle<Object> Factory::NewTypeError(const char* type,
+Handle<Object> Factory::NewTypeError(const char* message,
                                      Vector< Handle<Object> > args) {
-  return NewError("MakeTypeError", type, args);
+  return NewError("MakeTypeError", message, args);
 }
 
 
@@ -671,9 +721,9 @@ Handle<Object> Factory::NewTypeError(Handle<String> message) {
 }
 
 
-Handle<Object> Factory::NewRangeError(const char* type,
+Handle<Object> Factory::NewRangeError(const char* message,
                                       Vector< Handle<Object> > args) {
-  return NewError("MakeRangeError", type, args);
+  return NewError("MakeRangeError", message, args);
 }
 
 
@@ -682,8 +732,9 @@ Handle<Object> Factory::NewRangeError(Handle<String> message) {
 }
 
 
-Handle<Object> Factory::NewSyntaxError(const char* type, Handle<JSArray> args) {
-  return NewError("MakeSyntaxError", type, args);
+Handle<Object> Factory::NewSyntaxError(const char* message,
+                                       Handle<JSArray> args) {
+  return NewError("MakeSyntaxError", message, args);
 }
 
 
@@ -692,9 +743,9 @@ Handle<Object> Factory::NewSyntaxError(Handle<String> message) {
 }
 
 
-Handle<Object> Factory::NewReferenceError(const char* type,
+Handle<Object> Factory::NewReferenceError(const char* message,
                                           Vector< Handle<Object> > args) {
-  return NewError("MakeReferenceError", type, args);
+  return NewError("MakeReferenceError", message, args);
 }
 
 
@@ -704,7 +755,7 @@ Handle<Object> Factory::NewReferenceError(Handle<String> message) {
 
 
 Handle<Object> Factory::NewError(const char* maker,
-                                 const char* type,
+                                 const char* message,
                                  Vector< Handle<Object> > args) {
   // Instantiate a closeable HandleScope for EscapeFrom.
   v8::HandleScope scope(reinterpret_cast<v8::Isolate*>(isolate()));
@@ -713,24 +764,24 @@ Handle<Object> Factory::NewError(const char* maker,
     array->set(i, *args[i]);
   }
   Handle<JSArray> object = NewJSArrayWithElements(array);
-  Handle<Object> result = NewError(maker, type, object);
+  Handle<Object> result = NewError(maker, message, object);
   return result.EscapeFrom(&scope);
 }
 
 
-Handle<Object> Factory::NewEvalError(const char* type,
+Handle<Object> Factory::NewEvalError(const char* message,
                                      Vector< Handle<Object> > args) {
-  return NewError("MakeEvalError", type, args);
+  return NewError("MakeEvalError", message, args);
 }
 
 
-Handle<Object> Factory::NewError(const char* type,
+Handle<Object> Factory::NewError(const char* message,
                                  Vector< Handle<Object> > args) {
-  return NewError("MakeError", type, args);
+  return NewError("MakeError", message, args);
 }
 
 
-Handle<String> Factory::EmergencyNewError(const char* type,
+Handle<String> Factory::EmergencyNewError(const char* message,
                                           Handle<JSArray> args) {
   const int kBufferSize = 1000;
   char buffer[kBufferSize];
@@ -738,8 +789,8 @@ Handle<String> Factory::EmergencyNewError(const char* type,
   char* p = &buffer[0];
 
   Vector<char> v(buffer, kBufferSize);
-  OS::StrNCpy(v, type, space);
-  space -= Min(space, strlen(type));
+  OS::StrNCpy(v, message, space);
+  space -= Min(space, strlen(message));
   p = &buffer[kBufferSize] - space;
 
   for (unsigned i = 0; i < ARRAY_SIZE(args); i++) {
@@ -768,7 +819,7 @@ Handle<String> Factory::EmergencyNewError(const char* type,
 
 
 Handle<Object> Factory::NewError(const char* maker,
-                                 const char* type,
+                                 const char* message,
                                  Handle<JSArray> args) {
   Handle<String> make_str = InternalizeUtf8String(maker);
   Handle<Object> fun_obj(
@@ -777,11 +828,11 @@ Handle<Object> Factory::NewError(const char* maker,
   // If the builtins haven't been properly configured yet this error
   // constructor may not have been defined.  Bail out.
   if (!fun_obj->IsJSFunction()) {
-    return EmergencyNewError(type, args);
+    return EmergencyNewError(message, args);
   }
   Handle<JSFunction> fun = Handle<JSFunction>::cast(fun_obj);
-  Handle<Object> type_obj = InternalizeUtf8String(type);
-  Handle<Object> argv[] = { type_obj, args };
+  Handle<Object> message_obj = InternalizeUtf8String(message);
+  Handle<Object> argv[] = { message_obj, args };
 
   // Invoke the JavaScript factory method. If an exception is thrown while
   // running the factory method, use the exception as the result.
@@ -874,14 +925,7 @@ Handle<JSFunction> Factory::NewFunctionWithPrototype(Handle<String> name,
     initial_map->set_constructor(*function);
   }
 
-  // Set function.prototype and give the prototype a constructor
-  // property that refers to the function.
   SetPrototypeProperty(function, prototype);
-  // Currently safe because it is only invoked from Genesis.
-  CHECK_NOT_EMPTY_HANDLE(isolate(),
-                         JSObject::SetLocalPropertyIgnoreAttributes(
-                             prototype, constructor_string(),
-                             function, DONT_ENUM));
   return function;
 }
 
@@ -916,10 +960,11 @@ Handle<JSObject> Factory::NewExternal(void* value) {
 Handle<Code> Factory::NewCode(const CodeDesc& desc,
                               Code::Flags flags,
                               Handle<Object> self_ref,
-                              bool immovable) {
+                              bool immovable,
+                              bool crankshafted) {
   CALL_HEAP_FUNCTION(isolate(),
                      isolate()->heap()->CreateCode(
-                         desc, flags, self_ref, immovable),
+                         desc, flags, self_ref, immovable, crankshafted),
                      Code);
 }
 
@@ -1043,6 +1088,78 @@ void Factory::EnsureCanContainElements(Handle<JSArray> array,
 }
 
 
+Handle<JSArrayBuffer> Factory::NewJSArrayBuffer() {
+  JSFunction* array_buffer_fun =
+      isolate()->context()->native_context()->array_buffer_fun();
+  CALL_HEAP_FUNCTION(
+      isolate(),
+      isolate()->heap()->AllocateJSObject(array_buffer_fun),
+      JSArrayBuffer);
+}
+
+
+Handle<JSDataView> Factory::NewJSDataView() {
+  JSFunction* data_view_fun =
+      isolate()->context()->native_context()->data_view_fun();
+  CALL_HEAP_FUNCTION(
+      isolate(),
+      isolate()->heap()->AllocateJSObject(data_view_fun),
+      JSDataView);
+}
+
+
+Handle<JSTypedArray> Factory::NewJSTypedArray(ExternalArrayType type) {
+  JSFunction* typed_array_fun;
+  Context* native_context = isolate()->context()->native_context();
+  switch (type) {
+    case kExternalUnsignedByteArray:
+      typed_array_fun = native_context->uint8_array_fun();
+      break;
+
+    case kExternalByteArray:
+      typed_array_fun = native_context->int8_array_fun();
+      break;
+
+    case kExternalUnsignedShortArray:
+      typed_array_fun = native_context->uint16_array_fun();
+      break;
+
+    case kExternalShortArray:
+      typed_array_fun = native_context->int16_array_fun();
+      break;
+
+    case kExternalUnsignedIntArray:
+      typed_array_fun = native_context->uint32_array_fun();
+      break;
+
+    case kExternalIntArray:
+      typed_array_fun = native_context->int32_array_fun();
+      break;
+
+    case kExternalFloatArray:
+      typed_array_fun = native_context->float_array_fun();
+      break;
+
+    case kExternalDoubleArray:
+      typed_array_fun = native_context->double_array_fun();
+      break;
+
+    case kExternalPixelArray:
+      typed_array_fun = native_context->uint8c_array_fun();
+      break;
+
+    default:
+      UNREACHABLE();
+      return Handle<JSTypedArray>();
+  }
+
+  CALL_HEAP_FUNCTION(
+      isolate(),
+      isolate()->heap()->AllocateJSObject(typed_array_fun),
+      JSTypedArray);
+}
+
+
 Handle<JSProxy> Factory::NewJSProxy(Handle<Object> handler,
                                     Handle<Object> prototype) {
   CALL_HEAP_FUNCTION(
@@ -1078,6 +1195,7 @@ void Factory::SetIdentityHash(Handle<JSObject> object, Smi* hash) {
 Handle<SharedFunctionInfo> Factory::NewSharedFunctionInfo(
     Handle<String> name,
     int number_of_literals,
+    bool is_generator,
     Handle<Code> code,
     Handle<ScopeInfo> scope_info) {
   Handle<SharedFunctionInfo> shared = NewSharedFunctionInfo(name);
@@ -1091,6 +1209,9 @@ Handle<SharedFunctionInfo> Factory::NewSharedFunctionInfo(
     literals_array_size += JSFunction::kLiteralsPrefixSize;
   }
   shared->set_num_literals(literals_array_size);
+  if (is_generator) {
+    shared->set_instance_class_name(isolate()->heap()->Generator_string());
+  }
   return shared;
 }
 

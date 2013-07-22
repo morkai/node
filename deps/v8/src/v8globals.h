@@ -111,7 +111,6 @@ class AccessorInfo;
 class Allocation;
 class Arguments;
 class Assembler;
-class AssertNoAllocation;
 class Code;
 class CodeGenerator;
 class CodeStub;
@@ -162,8 +161,6 @@ class Variable;
 class RelocInfo;
 class Deserializer;
 class MessageLocation;
-class ObjectGroup;
-class TickSample;
 class VirtualMemory;
 class Mutex;
 
@@ -183,12 +180,13 @@ enum AllocationSpace {
   CODE_SPACE,           // No pointers to new space, marked executable.
   MAP_SPACE,            // Only and all map objects.
   CELL_SPACE,           // Only and all cell objects.
+  PROPERTY_CELL_SPACE,  // Only and all global property cell objects.
   LO_SPACE,             // Promoted large objects.
 
   FIRST_SPACE = NEW_SPACE,
   LAST_SPACE = LO_SPACE,
   FIRST_PAGED_SPACE = OLD_POINTER_SPACE,
-  LAST_PAGED_SPACE = CELL_SPACE
+  LAST_PAGED_SPACE = PROPERTY_CELL_SPACE
 };
 const int kSpaceTagSize = 3;
 const int kSpaceTagMask = (1 << kSpaceTagSize) - 1;
@@ -296,7 +294,7 @@ enum CallFunctionFlags {
 
 enum InlineCacheHolderFlag {
   OWN_MAP,  // For fast properties objects.
-  DELEGATE_MAP  // For slow properties objects (except GlobalObjects).
+  PROTOTYPE_MAP  // For slow properties objects (except GlobalObjects).
 };
 
 
@@ -364,7 +362,6 @@ enum StateTag {
   JS,
   GC,
   COMPILER,
-  PARALLEL_COMPILER,
   OTHER,
   EXTERNAL
 };
@@ -433,11 +430,10 @@ enum CpuFeature { SSE4_1 = 32 + 19,  // x86
                   CPUID = 10,  // x86
                   VFP3 = 1,    // ARM
                   ARMv7 = 2,   // ARM
-                  VFP2 = 3,    // ARM
-                  SUDIV = 4,   // ARM
-                  UNALIGNED_ACCESSES = 5,  // ARM
-                  MOVW_MOVT_IMMEDIATE_LOADS = 6,  // ARM
-                  VFP32DREGS = 7,  // ARM
+                  SUDIV = 3,   // ARM
+                  UNALIGNED_ACCESSES = 4,  // ARM
+                  MOVW_MOVT_IMMEDIATE_LOADS = 5,  // ARM
+                  VFP32DREGS = 6,  // ARM
                   SAHF = 0,    // x86
                   FPU = 1};    // MIPS
 
@@ -496,8 +492,8 @@ enum VariableMode {
   INTERNAL,        // like VAR, but not user-visible (may or may not
                    // be in a context)
 
-  TEMPORARY,       // temporary variables (not user-visible), never
-                   // in a context
+  TEMPORARY,       // temporary variables (not user-visible), stack-allocated
+                   // unless the scope as a whole has forced context allocation
 
   DYNAMIC,         // always require dynamic lookup (we don't know
                    // the declaration)

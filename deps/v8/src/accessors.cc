@@ -441,6 +441,13 @@ const AccessorDescriptor Accessors::ScriptEvalFromFunctionName = {
 //
 
 
+Handle<Object> Accessors::FunctionGetPrototype(Handle<Object> object) {
+  Isolate* isolate = Isolate::Current();
+  CALL_HEAP_FUNCTION(
+      isolate, Accessors::FunctionGetPrototype(*object, 0), Object);
+}
+
+
 MaybeObject* Accessors::FunctionGetPrototype(Object* object, void*) {
   Isolate* isolate = Isolate::Current();
   JSFunction* function = FindInstanceOf<JSFunction>(isolate, object);
@@ -680,7 +687,7 @@ const AccessorDescriptor Accessors::FunctionArguments = {
 
 class FrameFunctionIterator {
  public:
-  FrameFunctionIterator(Isolate* isolate, const AssertNoAllocation& promise)
+  FrameFunctionIterator(Isolate* isolate, const DisallowHeapAllocation& promise)
       : frame_iterator_(isolate),
         functions_(2),
         index_(0) {
@@ -727,13 +734,13 @@ class FrameFunctionIterator {
 MaybeObject* Accessors::FunctionGetCaller(Object* object, void*) {
   Isolate* isolate = Isolate::Current();
   HandleScope scope(isolate);
-  AssertNoAllocation no_alloc;
+  DisallowHeapAllocation no_allocation;
   JSFunction* holder = FindInstanceOf<JSFunction>(isolate, object);
   if (holder == NULL) return isolate->heap()->undefined_value();
   if (holder->shared()->native()) return isolate->heap()->null_value();
   Handle<JSFunction> function(holder, isolate);
 
-  FrameFunctionIterator it(isolate, no_alloc);
+  FrameFunctionIterator it(isolate, no_allocation);
 
   // Find the function from the frames.
   if (!it.Find(*function)) {
@@ -783,70 +790,12 @@ const AccessorDescriptor Accessors::FunctionCaller = {
 
 
 //
-// Accessors::ObjectPrototype
-//
-
-
-static inline Object* GetPrototypeSkipHiddenPrototypes(Isolate* isolate,
-                                                       Object* receiver) {
-  Object* current = receiver->GetPrototype(isolate);
-  while (current->IsJSObject() &&
-         JSObject::cast(current)->map()->is_hidden_prototype()) {
-    current = current->GetPrototype(isolate);
-  }
-  return current;
-}
-
-
-MaybeObject* Accessors::ObjectGetPrototype(Object* receiver, void*) {
-  return GetPrototypeSkipHiddenPrototypes(Isolate::Current(), receiver);
-}
-
-
-MaybeObject* Accessors::ObjectSetPrototype(JSObject* receiver_raw,
-                                           Object* value_raw,
-                                           void*) {
-  const bool kSkipHiddenPrototypes = true;
-  // To be consistent with other Set functions, return the value.
-  if (!(FLAG_harmony_observation && receiver_raw->map()->is_observed()))
-    return receiver_raw->SetPrototype(value_raw, kSkipHiddenPrototypes);
-
-  Isolate* isolate = receiver_raw->GetIsolate();
-  HandleScope scope(isolate);
-  Handle<JSObject> receiver(receiver_raw);
-  Handle<Object> value(value_raw, isolate);
-  Handle<Object> old_value(GetPrototypeSkipHiddenPrototypes(isolate, *receiver),
-                           isolate);
-
-  MaybeObject* result = receiver->SetPrototype(*value, kSkipHiddenPrototypes);
-  Handle<Object> hresult;
-  if (!result->ToHandle(&hresult, isolate)) return result;
-
-  Handle<Object> new_value(GetPrototypeSkipHiddenPrototypes(isolate, *receiver),
-                           isolate);
-  if (!new_value->SameValue(*old_value)) {
-    JSObject::EnqueueChangeRecord(receiver, "prototype",
-                                  isolate->factory()->proto_string(),
-                                  old_value);
-  }
-  return *hresult;
-}
-
-
-const AccessorDescriptor Accessors::ObjectPrototype = {
-  ObjectGetPrototype,
-  ObjectSetPrototype,
-  0
-};
-
-
-//
 // Accessors::MakeModuleExport
 //
 
-static v8::Handle<v8::Value> ModuleGetExport(
+static void ModuleGetExport(
     v8::Local<v8::String> property,
-    const v8::AccessorInfo& info) {
+    const v8::PropertyCallbackInfo<v8::Value>& info) {
   JSModule* instance = JSModule::cast(*v8::Utils::OpenHandle(*info.Holder()));
   Context* context = Context::cast(instance->context());
   ASSERT(context->IsModuleContext());
@@ -858,16 +807,16 @@ static v8::Handle<v8::Value> ModuleGetExport(
     isolate->ScheduleThrow(
         *isolate->factory()->NewReferenceError("not_defined",
                                                HandleVector(&name, 1)));
-    return v8::Handle<v8::Value>();
+    return;
   }
-  return v8::Utils::ToLocal(Handle<Object>(value, isolate));
+  info.GetReturnValue().Set(v8::Utils::ToLocal(Handle<Object>(value, isolate)));
 }
 
 
 static void ModuleSetExport(
     v8::Local<v8::String> property,
     v8::Local<v8::Value> value,
-    const v8::AccessorInfo& info) {
+    const v8::PropertyCallbackInfo<v8::Value>& info) {
   JSModule* instance = JSModule::cast(*v8::Utils::OpenHandle(*info.Holder()));
   Context* context = Context::cast(instance->context());
   ASSERT(context->IsModuleContext());

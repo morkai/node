@@ -42,25 +42,6 @@ namespace v8 {
 namespace internal {
 
 
-// General collection of (multi-)bit-flags that can be passed to scanners and
-// parsers to signify their (initial) mode of operation.
-enum ParsingFlags {
-  kNoParsingFlags = 0,
-  // Embed LanguageMode values in parsing flags, i.e., equivalent to:
-  // CLASSIC_MODE = 0,
-  // STRICT_MODE,
-  // EXTENDED_MODE,
-  kLanguageModeMask = 0x03,
-  kAllowLazy = 0x04,
-  kAllowNativesSyntax = 0x08,
-  kAllowModules = 0x10
-};
-
-STATIC_ASSERT((kLanguageModeMask & CLASSIC_MODE) == CLASSIC_MODE);
-STATIC_ASSERT((kLanguageModeMask & STRICT_MODE) == STRICT_MODE);
-STATIC_ASSERT((kLanguageModeMask & EXTENDED_MODE) == EXTENDED_MODE);
-
-
 // Returns the value (0 .. 15) of a hexadecimal character c.
 // If c is not a legal hexadecimal character, returns a value < 0.
 inline int HexValue(uc32 c) {
@@ -197,6 +178,11 @@ class LiteralBuffer {
 
   bool is_ascii() { return is_ascii_; }
 
+  bool is_contextual_keyword(Vector<const char> keyword) {
+    return is_ascii() && keyword.length() == position_ &&
+        (memcmp(keyword.start(), backing_store_.start(), position_) == 0);
+  }
+
   Vector<const uc16> utf16_literal() {
     ASSERT(!is_ascii_);
     ASSERT((position_ & 0x1) == 0);
@@ -234,7 +220,7 @@ class LiteralBuffer {
 
   void ExpandBuffer() {
     Vector<byte> new_store = Vector<byte>::New(NewCapacity(kInitialCapacity));
-    memcpy(new_store.start(), backing_store_.start(), position_);
+    OS::MemCopy(new_store.start(), backing_store_.start(), position_);
     backing_store_.Dispose();
     backing_store_ = new_store;
   }
@@ -344,6 +330,10 @@ class Scanner {
     ASSERT_NOT_NULL(current_.literal_chars);
     return current_.literal_chars->is_ascii();
   }
+  bool is_literal_contextual_keyword(Vector<const char> keyword) {
+    ASSERT_NOT_NULL(current_.literal_chars);
+    return current_.literal_chars->is_contextual_keyword(keyword);
+  }
   int literal_length() const {
     ASSERT_NOT_NULL(current_.literal_chars);
     return current_.literal_chars->length();
@@ -379,6 +369,10 @@ class Scanner {
   bool is_next_literal_ascii() {
     ASSERT_NOT_NULL(next_.literal_chars);
     return next_.literal_chars->is_ascii();
+  }
+  bool is_next_contextual_keyword(Vector<const char> keyword) {
+    ASSERT_NOT_NULL(next_.literal_chars);
+    return next_.literal_chars->is_contextual_keyword(keyword);
   }
   int next_literal_length() const {
     ASSERT_NOT_NULL(next_.literal_chars);

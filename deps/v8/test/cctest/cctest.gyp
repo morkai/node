@@ -26,10 +26,11 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 {
-  'includes': ['../../build/common.gypi'],
   'variables': {
+    'v8_code': 1,
     'generated_file': '<(SHARED_INTERMEDIATE_DIR)/resources.cc',
   },
+  'includes': ['../../build/common.gypi'],
   'targets': [
     {
       'target_name': 'cctest',
@@ -53,6 +54,7 @@
         'test-bignum.cc',
         'test-bignum-dtoa.cc',
         'test-circular-queue.cc',
+        'test-compare-nil-ic-stub.cc',
         'test-compiler.cc',
         'test-conversions.cc',
         'test-cpu-profiler.cc',
@@ -70,6 +72,7 @@
         'test-fixed-dtoa.cc',
         'test-flags.cc',
         'test-func-name-inference.cc',
+        'test-global-handles.cc',
         'test-global-object.cc',
         'test-hashing.cc',
         'test-hashmap.cc',
@@ -97,10 +100,12 @@
         'test-strtod.cc',
         'test-thread-termination.cc',
         'test-threads.cc',
+        'test-types.cc',
         'test-unbound-queue.cc',
         'test-utils.cc',
         'test-version.cc',
-        'test-weakmaps.cc'
+        'test-weakmaps.cc',
+        'test-weaktypedarrays.cc'
       ],
       'conditions': [
         ['v8_target_arch=="ia32"', {
@@ -158,7 +163,9 @@
               'dependencies': ['../../tools/gyp/v8.gyp:v8_snapshot'],
             },
             {
-              'dependencies': ['../../tools/gyp/v8.gyp:v8_nosnapshot'],
+              'dependencies': [
+                '../../tools/gyp/v8.gyp:v8_nosnapshot.<(v8_target_arch)',
+              ],
             }],
           ],
         }, {

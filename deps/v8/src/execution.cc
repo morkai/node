@@ -33,6 +33,7 @@
 #include "bootstrapper.h"
 #include "codegen.h"
 #include "debug.h"
+#include "deoptimizer.h"
 #include "isolate-inl.h"
 #include "runtime-profiler.h"
 #include "simulator.h"
@@ -75,7 +76,7 @@ static Handle<Object> Invoke(bool is_construct,
   Isolate* isolate = function->GetIsolate();
 
   // Entering JavaScript.
-  VMState state(isolate, JS);
+  VMState<JS> state(isolate);
 
   // Placeholder for return value.
   MaybeObject* value = reinterpret_cast<Object*>(kZapValue);
@@ -106,7 +107,7 @@ static Handle<Object> Invoke(bool is_construct,
     // Save and restore context around invocation and block the
     // allocation of handles without explicit handle scopes.
     SaveContext save(isolate);
-    NoHandleAllocation na(isolate);
+    SealHandleScope shs(isolate);
     JSEntryFunction stub_entry = FUNCTION_CAST<JSEntryFunction>(code->entry());
 
     // Call the function through the right JS entry stub.
@@ -425,6 +426,13 @@ bool StackGuard::IsTerminateExecution() {
 }
 
 
+void StackGuard::CancelTerminateExecution() {
+  ExecutionAccess access(isolate_);
+  Continue(TERMINATE);
+  isolate_->CancelTerminateExecution();
+}
+
+
 void StackGuard::TerminateExecution() {
   ExecutionAccess access(isolate_);
   thread_local_.interrupt_flags_ |= TERMINATE;
@@ -445,6 +453,19 @@ void StackGuard::RequestGC() {
     thread_local_.jslimit_ = thread_local_.climit_ = kInterruptLimit;
     isolate_->heap()->SetStackLimits();
   }
+}
+
+
+bool StackGuard::IsFullDeopt() {
+  ExecutionAccess access(isolate_);
+  return (thread_local_.interrupt_flags_ & FULL_DEOPT) != 0;
+}
+
+
+void StackGuard::FullDeopt() {
+  ExecutionAccess access(isolate_);
+  thread_local_.interrupt_flags_ |= FULL_DEOPT;
+  set_interrupt_limits(access);
 }
 
 
@@ -488,7 +509,7 @@ void StackGuard::Continue(InterruptFlag after_what) {
 
 char* StackGuard::ArchiveStackGuard(char* to) {
   ExecutionAccess access(isolate_);
-  memcpy(to, reinterpret_cast<char*>(&thread_local_), sizeof(ThreadLocal));
+  OS::MemCopy(to, reinterpret_cast<char*>(&thread_local_), sizeof(ThreadLocal));
   ThreadLocal blank;
 
   // Set the stack limits using the old thread_local_.
@@ -505,7 +526,8 @@ char* StackGuard::ArchiveStackGuard(char* to) {
 
 char* StackGuard::RestoreStackGuard(char* from) {
   ExecutionAccess access(isolate_);
-  memcpy(reinterpret_cast<char*>(&thread_local_), from, sizeof(ThreadLocal));
+  OS::MemCopy(
+      reinterpret_cast<char*>(&thread_local_), from, sizeof(ThreadLocal));
   isolate_->heap()->SetStackLimits();
   return from + sizeof(ThreadLocal);
 }
@@ -619,7 +641,8 @@ Handle<Object> Execution::ToInt32(Handle<Object> obj, bool* exc) {
 
 
 Handle<Object> Execution::NewDate(double time, bool* exc) {
-  Handle<Object> time_obj = FACTORY->NewNumber(time);
+  Isolate* isolate = Isolate::Current();
+  Handle<Object> time_obj = isolate->factory()->NewNumber(time);
   RETURN_NATIVE_CALL(create_date, { time_obj }, exc);
 }
 
@@ -880,7 +903,6 @@ MaybeObject* Execution::HandleStackGuardInterrupt(Isolate* isolate) {
     stack_guard->Continue(GC_REQUEST);
   }
 
-
   isolate->counters()->stack_interrupts()->Increment();
   isolate->counters()->runtime_profiler_ticks()->Increment();
   isolate->runtime_profiler()->OptimizeNow();
@@ -897,6 +919,10 @@ MaybeObject* Execution::HandleStackGuardInterrupt(Isolate* isolate) {
   if (stack_guard->IsInterrupted()) {
     stack_guard->Continue(INTERRUPT);
     return isolate->StackOverflow();
+  }
+  if (stack_guard->IsFullDeopt()) {
+    stack_guard->Continue(FULL_DEOPT);
+    Deoptimizer::DeoptimizeAll(isolate);
   }
   return isolate->heap()->undefined_value();
 }

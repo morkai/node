@@ -10,7 +10,8 @@ import sys
 CC = os.environ.get('CC', 'cc')
 
 root_dir = os.path.dirname(__file__)
-sys.path.insert(0, os.path.join(root_dir, 'deps', 'v8', 'tools'))
+sys.path.insert(0, os.path.join(root_dir, 'tools', 'gyp', 'pylib'))
+from gyp.common import GetFlavor
 
 # parse our options
 parser = optparse.OptionParser()
@@ -236,7 +237,7 @@ parser.add_option("--dest-os",
     action="store",
     dest="dest_os",
     help="Operating system to build for. Valid values are: "
-         "win, mac, solaris, freebsd, linux")
+         "win, mac, solaris, freebsd, openbsd, linux, android")
 
 parser.add_option("--no-ifaddrs",
     action="store_true",
@@ -253,12 +254,6 @@ parser.add_option("--ninja",
     action="store_true",
     dest="use_ninja",
     help="Generate files for the ninja build system")
-
-# Using --unsafe-optimizations voids your warranty.
-parser.add_option("--unsafe-optimizations",
-    action="store_true",
-    dest="unsafe_optimizations",
-    help=optparse.SUPPRESS_HELP)
 
 parser.add_option("--xcode",
     action="store_true",
@@ -341,7 +336,7 @@ def is_arm_neon():
   return '__ARM_NEON__' in cc_macros()
 
 
-def arm_hard_float_abi():
+def is_arm_hard_float_abi():
   """Check for hardfloat or softfloat eabi on ARM"""
   # GCC versions 4.6 and above define __ARM_PCS or __ARM_PCS_VFP to specify
   # the Floating Point ABI used (PCS stands for Procedure Call Standard).
@@ -380,6 +375,7 @@ def host_arch_cc():
     '__x86_64__'  : 'x64',
     '__i386__'    : 'ia32',
     '__arm__'     : 'arm',
+    '__mips__'    : 'mips',
   }
 
   rtn = 'ia32' # default
@@ -401,6 +397,7 @@ def host_arch_win():
     'AMD64'  : 'x64',
     'x86'    : 'ia32',
     'arm'    : 'arm',
+    'mips'   : 'mips',
   }
 
   return matchup.get(arch, 'ia32')
@@ -421,30 +418,24 @@ def compiler_version():
 
 
 def configure_arm(o):
-  # V8 on ARM requires that armv7 is set. CPU Model detected by
-  # the presence of __ARM_ARCH_7__ and the like defines in compiler
   if options.arm_float_abi:
-    hard_float = options.arm_float_abi == 'hard'
+    arm_float_abi = options.arm_float_abi
   else:
-    hard_float = arm_hard_float_abi()
-
-  armv7 = is_arch_armv7()
-  # CHECKME VFPv3 implies ARMv7+ but is the reverse true as well?
-  fpu = 'vfpv3' if armv7 else 'vfpv2'
-
-  o['variables']['armv7'] = int(armv7)
-  o['variables']['arm_fpu'] = fpu
+    arm_float_abi = 'hard' if is_arm_hard_float_abi() else 'default'
+  o['variables']['armv7'] = int(is_arch_armv7())
+  o['variables']['arm_fpu'] = 'vfpv3'  # V8 3.18 no longer supports VFP2.
   o['variables']['arm_neon'] = int(is_arm_neon())
-  o['variables']['v8_use_arm_eabi_hardfloat'] = b(hard_float)
+  o['variables']['arm_thumb'] = 0      # -marm
+  o['variables']['arm_float_abi'] = arm_float_abi
 
 
 def configure_node(o):
+  if options.dest_os == 'android':
+    o['variables']['OS'] = "android"
   o['variables']['v8_enable_gdbjit'] = 1 if options.gdb else 0
   o['variables']['v8_no_strict_aliasing'] = 1 # work around compiler bugs
   o['variables']['node_prefix'] = os.path.expanduser(options.prefix or '')
   o['variables']['node_install_npm'] = b(not options.without_npm)
-  o['variables']['node_unsafe_optimizations'] = (
-    1 if options.unsafe_optimizations else 0)
   o['default_configuration'] = 'Debug' if options.debug else 'Release'
 
   host_arch = host_arch_win() if os.name == 'nt' else host_arch_cc()
@@ -468,16 +459,18 @@ def configure_node(o):
   # By default, enable DTrace on SunOS systems. Don't allow it on other
   # systems, since it won't work.  (The MacOS build process is different than
   # SunOS, and we haven't implemented it.)
-  if sys.platform.startswith('sunos') or sys.platform.startswith('darwin'):
+  if flavor in ('solaris', 'mac'):
     o['variables']['node_use_dtrace'] = b(not options.without_dtrace)
-  elif sys.platform.startswith('linux'):
+    o['variables']['uv_use_dtrace'] = o['variables']['node_use_dtrace']
+    o['variables']['uv_parent_path'] = '/deps/uv/'
+  elif flavor == 'linux':
     o['variables']['node_use_dtrace'] = 'false'
     o['variables']['node_use_systemtap'] = b(options.with_dtrace)
     if options.systemtap_includes:
       o['include_dirs'] += [options.systemtap_includes]
   elif options.with_dtrace:
     raise Exception(
-       'DTrace is currently only supported on SunOS or Linux systems.')
+       'DTrace is currently only supported on SunOS, MacOS or Linux systems.')
   else:
     o['variables']['node_use_dtrace'] = 'false'
     o['variables']['node_use_systemtap'] = 'false'
@@ -486,7 +479,7 @@ def configure_node(o):
     o['defines'] += ['SUNOS_NO_IFADDRS']
 
   # By default, enable ETW on Windows.
-  if sys.platform.startswith('win32'):
+  if flavor == 'win':
     o['variables']['node_use_etw'] = b(not options.without_etw);
   elif options.with_etw:
     raise Exception('ETW is only supported on Windows.')
@@ -494,7 +487,7 @@ def configure_node(o):
     o['variables']['node_use_etw'] = 'false'
 
   # By default, enable Performance counters on Windows.
-  if sys.platform.startswith('win32'):
+  if flavor == 'win':
     o['variables']['node_use_perfctr'] = b(not options.without_perfctr);
   elif options.with_perfctr:
     raise Exception('Performance counter is only supported on Windows.')
@@ -607,7 +600,7 @@ def configure_openssl(o):
 
 
 def configure_winsdk(o):
-  if not sys.platform.startswith('win32'):
+  if flavor != 'win':
     return
 
   winsdk_dir = os.environ.get("WindowsSdkDir")
@@ -619,6 +612,13 @@ def configure_winsdk(o):
 
   print "ctrpp not found in WinSDK path--using pre-gen files from tools/msvs/genfiles."
 
+
+# determine the "flavor" (operating system) we're building for,
+# leveraging gyp's GetFlavor function
+flavor_params = {};
+if (options.dest_os):
+  flavor_params['flavor'] = options.dest_os;
+flavor = GetFlavor(flavor_params);
 
 output = {
   'variables': { 'python': sys.executable },
@@ -636,6 +636,7 @@ configure_libuv(output)
 configure_v8(output)
 configure_openssl(output)
 configure_winsdk(output)
+
 
 # variables should be a root level element,
 # move everything else to target_defaults
@@ -662,20 +663,22 @@ config = {
   'USE_XCODE': str(int(options.use_xcode or 0)),
   'PYTHON': sys.executable,
 }
+
+if options.prefix:
+  config['PREFIX'] = options.prefix
+
 config = '\n'.join(map('='.join, config.iteritems())) + '\n'
 
 write('config.mk',
       '# Do not edit. Generated by the configure script.\n' + config)
 
 if options.use_ninja:
-  gyp_args = ['-f', 'ninja']
+  gyp_args = ['-f', 'ninja-' + flavor]
 elif options.use_xcode:
   gyp_args = ['-f', 'xcode']
-elif os.name == 'nt':
+elif flavor == 'win':
   gyp_args = ['-f', 'msvs', '-G', 'msvs_version=auto']
-elif options.dest_os:
-  gyp_args = ['-f', 'make-' + options.dest_os]
 else:
-  gyp_args = ['-f', 'make']
+  gyp_args = ['-f', 'make-' + flavor]
 
 subprocess.call([sys.executable, 'tools/gyp_node'] + gyp_args)

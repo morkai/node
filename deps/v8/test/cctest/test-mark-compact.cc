@@ -35,6 +35,7 @@
 #include <errno.h>
 #endif
 
+
 #include "v8.h"
 
 #include "global-handles.h"
@@ -43,16 +44,9 @@
 
 using namespace v8::internal;
 
-static v8::Persistent<v8::Context> env;
-
-static void InitializeVM() {
-  if (env.IsEmpty()) env = v8::Context::New();
-  env->Enter();
-}
-
 
 TEST(MarkingDeque) {
-  InitializeVM();
+  CcTest::InitializeVM();
   int mem_size = 20 * kPointerSize;
   byte* mem = NewArray<byte>(20*kPointerSize);
   Address low = reinterpret_cast<Address>(mem);
@@ -89,9 +83,9 @@ TEST(Promotion) {
   FLAG_always_compact = true;
   HEAP->ConfigureHeap(2*256*KB, 8*MB, 8*MB);
 
-  InitializeVM();
+  CcTest::InitializeVM();
 
-  v8::HandleScope sc(env->GetIsolate());
+  v8::HandleScope sc(CcTest::isolate());
 
   // Allocate a fixed array in the new space.
   int array_size =
@@ -117,9 +111,9 @@ TEST(NoPromotion) {
 
   // Test the situation that some objects in new space are promoted to
   // the old space
-  InitializeVM();
+  CcTest::InitializeVM();
 
-  v8::HandleScope sc(env->GetIsolate());
+  v8::HandleScope sc(CcTest::isolate());
 
   // Do a mark compact GC to shrink the heap.
   HEAP->CollectGarbage(OLD_POINTER_SPACE);
@@ -155,9 +149,9 @@ TEST(NoPromotion) {
 
 
 TEST(MarkCompactCollector) {
-  InitializeVM();
+  CcTest::InitializeVM();
 
-  v8::HandleScope sc(env->GetIsolate());
+  v8::HandleScope sc(CcTest::isolate());
   // call mark-compact when heap is empty
   HEAP->CollectGarbage(OLD_POINTER_SPACE);
 
@@ -241,24 +235,26 @@ TEST(MarkCompactCollector) {
 
 // TODO(1600): compaction of map space is temporary removed from GC.
 #if 0
-static Handle<Map> CreateMap() {
-  return FACTORY->NewMap(JS_OBJECT_TYPE, JSObject::kHeaderSize);
+static Handle<Map> CreateMap(Isolate* isolate) {
+  return isolate->factory()->NewMap(JS_OBJECT_TYPE, JSObject::kHeaderSize);
 }
 
 
 TEST(MapCompact) {
   FLAG_max_map_space_pages = 16;
-  InitializeVM();
+  CcTest::InitializeVM();
+  Isolate* isolate = Isolate::Current();
+  Factory* factory = isolate->factory();
 
   {
     v8::HandleScope sc;
     // keep allocating maps while pointers are still encodable and thus
     // mark compact is permitted.
-    Handle<JSObject> root = FACTORY->NewJSObjectFromMap(CreateMap());
+    Handle<JSObject> root = factory->NewJSObjectFromMap(CreateMap());
     do {
       Handle<Map> map = CreateMap();
       map->set_prototype(*root);
-      root = FACTORY->NewJSObjectFromMap(map);
+      root = factory->NewJSObjectFromMap(map);
     } while (HEAP->map_space()->MapPointersEncodable());
   }
   // Now, as we don't have any handles to just allocated maps, we should
@@ -287,7 +283,8 @@ static void GCEpilogueCallbackFunc() {
 
 
 TEST(GCCallback) {
-  InitializeVM();
+  i::FLAG_stress_compaction = false;
+  CcTest::InitializeVM();
 
   HEAP->SetGlobalGCPrologueCallback(&GCPrologueCallbackFunc);
   HEAP->SetGlobalGCEpilogueCallback(&GCEpilogueCallbackFunc);
@@ -306,20 +303,20 @@ TEST(GCCallback) {
 
 static int NumberOfWeakCalls = 0;
 static void WeakPointerCallback(v8::Isolate* isolate,
-                                v8::Persistent<v8::Value> handle,
+                                v8::Persistent<v8::Value>* handle,
                                 void* id) {
   ASSERT(id == reinterpret_cast<void*>(1234));
   NumberOfWeakCalls++;
-  handle.Dispose(isolate);
+  handle->Dispose(isolate);
 }
 
 TEST(ObjectGroups) {
   FLAG_incremental_marking = false;
-  InitializeVM();
+  CcTest::InitializeVM();
   GlobalHandles* global_handles = Isolate::Current()->global_handles();
 
   NumberOfWeakCalls = 0;
-  v8::HandleScope handle_scope(env->GetIsolate());
+  v8::HandleScope handle_scope(CcTest::isolate());
 
   Handle<Object> g1s1 =
       global_handles->Create(HEAP->AllocateFixedArray(1)->ToObjectChecked());
@@ -329,15 +326,12 @@ TEST(ObjectGroups) {
       global_handles->Create(HEAP->AllocateFixedArray(1)->ToObjectChecked());
   global_handles->MakeWeak(g1s1.location(),
                            reinterpret_cast<void*>(1234),
-                           NULL,
                            &WeakPointerCallback);
   global_handles->MakeWeak(g1s2.location(),
                            reinterpret_cast<void*>(1234),
-                           NULL,
                            &WeakPointerCallback);
   global_handles->MakeWeak(g1c1.location(),
                            reinterpret_cast<void*>(1234),
-                           NULL,
                            &WeakPointerCallback);
 
   Handle<Object> g2s1 =
@@ -348,15 +342,12 @@ TEST(ObjectGroups) {
     global_handles->Create(HEAP->AllocateFixedArray(1)->ToObjectChecked());
   global_handles->MakeWeak(g2s1.location(),
                            reinterpret_cast<void*>(1234),
-                           NULL,
                            &WeakPointerCallback);
   global_handles->MakeWeak(g2s2.location(),
                            reinterpret_cast<void*>(1234),
-                           NULL,
                            &WeakPointerCallback);
   global_handles->MakeWeak(g2c1.location(),
                            reinterpret_cast<void*>(1234),
-                           NULL,
                            &WeakPointerCallback);
 
   Handle<Object> root = global_handles->Create(*g1s1);  // make a root.
@@ -375,7 +366,7 @@ TEST(ObjectGroups) {
         Handle<HeapObject>::cast(g1s1).location(), g1_children, 1);
     global_handles->AddObjectGroup(g2_objects, 2, NULL);
     global_handles->AddImplicitReferences(
-        Handle<HeapObject>::cast(g2s2).location(), g2_children, 1);
+        Handle<HeapObject>::cast(g2s1).location(), g2_children, 1);
   }
   // Do a full GC
   HEAP->CollectGarbage(OLD_POINTER_SPACE);
@@ -386,7 +377,6 @@ TEST(ObjectGroups) {
   // Weaken the root.
   global_handles->MakeWeak(root.location(),
                            reinterpret_cast<void*>(1234),
-                           NULL,
                            &WeakPointerCallback);
   // But make children strong roots---all the objects (except for children)
   // should be collectable now.
@@ -404,7 +394,7 @@ TEST(ObjectGroups) {
         Handle<HeapObject>::cast(g1s1).location(), g1_children, 1);
     global_handles->AddObjectGroup(g2_objects, 2, NULL);
     global_handles->AddImplicitReferences(
-        Handle<HeapObject>::cast(g2s2).location(), g2_children, 1);
+        Handle<HeapObject>::cast(g2s1).location(), g2_children, 1);
   }
 
   HEAP->CollectGarbage(OLD_POINTER_SPACE);
@@ -415,11 +405,9 @@ TEST(ObjectGroups) {
   // And now make children weak again and collect them.
   global_handles->MakeWeak(g1c1.location(),
                            reinterpret_cast<void*>(1234),
-                           NULL,
                            &WeakPointerCallback);
   global_handles->MakeWeak(g2c1.location(),
                            reinterpret_cast<void*>(1234),
-                           NULL,
                            &WeakPointerCallback);
 
   HEAP->CollectGarbage(OLD_POINTER_SPACE);
@@ -452,10 +440,10 @@ class TestRetainedObjectInfo : public v8::RetainedObjectInfo {
 
 
 TEST(EmptyObjectGroups) {
-  InitializeVM();
+  CcTest::InitializeVM();
   GlobalHandles* global_handles = Isolate::Current()->global_handles();
 
-  v8::HandleScope handle_scope(env->GetIsolate());
+  v8::HandleScope handle_scope(CcTest::isolate());
 
   Handle<Object> object =
       global_handles->Create(HEAP->AllocateFixedArray(1)->ToObjectChecked());
@@ -469,10 +457,17 @@ TEST(EmptyObjectGroups) {
 }
 
 
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define V8_WITH_ASAN 1
+#endif
+#endif
+
+
 // Here is a memory use test that uses /proc, and is therefore Linux-only.  We
 // do not care how much memory the simulator uses, since it is only there for
-// debugging purposes.
-#if defined(__linux__) && !defined(USE_SIMULATOR)
+// debugging purposes. Testing with ASAN doesn't make sense, either.
+#if defined(__linux__) && !defined(USE_SIMULATOR) && !defined(V8_WITH_ASAN)
 
 
 static uintptr_t ReadLong(char* buffer, intptr_t* position, int base) {
@@ -552,7 +547,7 @@ TEST(BootUpMemoryUse) {
   // Only Linux has the proc filesystem and only if it is mapped.  If it's not
   // there we just skip the test.
   if (initial_memory >= 0) {
-    InitializeVM();
+    CcTest::InitializeVM();
     intptr_t delta = MemoryInUse() - initial_memory;
     printf("delta: %" V8_PTR_PREFIX "d kB\n", delta / 1024);
     if (sizeof(initial_memory) == 8) {  // 64-bit.
@@ -563,11 +558,32 @@ TEST(BootUpMemoryUse) {
       }
     } else {                            // 32-bit.
       if (v8::internal::Snapshot::IsEnabled()) {
-        CHECK_LE(delta, 2900 * 1024);
+        CHECK_LE(delta, 3100 * 1024);
       } else {
         CHECK_LE(delta, 3400 * 1024);
       }
     }
+  }
+}
+
+
+intptr_t ShortLivingIsolate() {
+  v8::Isolate* isolate = v8::Isolate::New();
+  { v8::Isolate::Scope isolate_scope(isolate);
+    v8::Locker lock(isolate);
+    v8::HandleScope handle_scope;
+    v8::Local<v8::Context> context = v8::Context::New(isolate);
+    CHECK(!context.IsEmpty());
+  }
+  isolate->Dispose();
+  return MemoryInUse();
+}
+
+
+TEST(RegressJoinThreadsOnIsolateDeinit) {
+  intptr_t size_limit = ShortLivingIsolate() * 2;
+  for (int i = 0; i < 10; i++) {
+    CHECK_GT(size_limit, ShortLivingIsolate());
   }
 }
 

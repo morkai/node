@@ -22,44 +22,45 @@
 #ifndef REQ_WRAP_H_
 #define REQ_WRAP_H_
 
-#include "ngx-queue.h"
+#include "queue.h"
 
 namespace node {
 
 // defined in node.cc
-extern v8::Persistent<v8::String> process_symbol;
-extern v8::Persistent<v8::String> domain_symbol;
-extern ngx_queue_t req_wrap_queue;
+extern Cached<v8::String> process_symbol;
+extern Cached<v8::String> domain_symbol;
+extern QUEUE req_wrap_queue;
 
 template <typename T>
 class ReqWrap {
- public:
-  ReqWrap() {
-    v8::HandleScope scope;
-    object_ = v8::Persistent<v8::Object>::New(node_isolate, v8::Object::New());
+public:
+  ReqWrap(v8::Handle<v8::Object> object = v8::Handle<v8::Object>()) {
+    v8::HandleScope scope(node_isolate);
+    if (object.IsEmpty()) object = v8::Object::New();
+    persistent().Reset(node_isolate, object);
 
-    v8::Local<v8::Value> domain = v8::Context::GetCurrent()
-                                  ->Global()
-                                  ->Get(process_symbol)
-                                  ->ToObject()
-                                  ->Get(domain_symbol);
+    if (using_domains) {
+      v8::Local<v8::Value> domain = v8::Context::GetCurrent()
+                                    ->Global()
+                                    ->Get(process_symbol)
+                                    ->ToObject()
+                                    ->Get(domain_symbol);
 
-    if (!domain->IsUndefined()) {
-      // fprintf(stderr, "setting domain on ReqWrap\n");
-      object_->Set(domain_symbol, domain);
+      if (!domain->IsUndefined()) {
+        object->Set(domain_symbol, domain);
+      }
     }
 
-    ngx_queue_insert_tail(&req_wrap_queue, &req_wrap_queue_);
+    QUEUE_INSERT_TAIL(&req_wrap_queue, &req_wrap_queue_);
   }
 
 
   ~ReqWrap() {
-    ngx_queue_remove(&req_wrap_queue_);
+    QUEUE_REMOVE(&req_wrap_queue_);
     // Assert that someone has called Dispatched()
     assert(req_.data == this);
-    assert(!object_.IsEmpty());
-    object_.Dispose(node_isolate);
-    object_.Clear();
+    assert(!persistent().IsEmpty());
+    persistent().Dispose();
   }
 
   // Call this after the req has been dispatched.
@@ -67,8 +68,16 @@ class ReqWrap {
     req_.data = this;
   }
 
+  inline v8::Local<v8::Object> object() {
+    return v8::Local<v8::Object>::New(node_isolate, persistent());
+  }
+
+  inline v8::Persistent<v8::Object>& persistent() {
+    return object_;
+  }
+
   v8::Persistent<v8::Object> object_;
-  ngx_queue_t req_wrap_queue_;
+  QUEUE req_wrap_queue_;
   void* data_;
   T req_; // *must* be last, GetActiveRequests() in node.cc depends on it
 };

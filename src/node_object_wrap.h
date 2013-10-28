@@ -19,8 +19,8 @@
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
 // USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-#ifndef object_wrap_h
-#define object_wrap_h
+#ifndef SRC_NODE_OBJECT_WRAP_H_
+#define SRC_NODE_OBJECT_WRAP_H_
 
 #include "node.h"
 #include "v8.h"
@@ -38,14 +38,15 @@
 namespace node {
 
 class NODE_EXTERN ObjectWrap {
-public:
+ public:
   ObjectWrap() {
     refs_ = 0;
   }
 
 
   virtual ~ObjectWrap() {
-    if (persistent().IsEmpty()) return;
+    if (persistent().IsEmpty())
+      return;
     assert(persistent().IsNearDeath());
     persistent().ClearWeak();
     persistent().Dispose();
@@ -56,7 +57,11 @@ public:
   static inline T* Unwrap(v8::Handle<v8::Object> handle) {
     assert(!handle.IsEmpty());
     assert(handle->InternalFieldCount() > 0);
-    return static_cast<T*>(handle->GetAlignedPointerFromInternalField(0));
+    // Cast to ObjectWrap before casting to T.  A direct cast from void
+    // to T won't work right when T has more than one base class.
+    void* ptr = handle->GetAlignedPointerFromInternalField(0);
+    ObjectWrap* wrap = static_cast<ObjectWrap*>(ptr);
+    return static_cast<T*>(wrap);
   }
 
 
@@ -75,7 +80,7 @@ public:
   }
 
 
-protected:
+ protected:
   inline void Wrap(v8::Handle<v8::Object> handle) {
     assert(persistent().IsEmpty());
     assert(handle->InternalFieldCount() > 0);
@@ -113,12 +118,13 @@ protected:
     assert(!persistent().IsEmpty());
     assert(!persistent().IsWeak());
     assert(refs_ > 0);
-    if (--refs_ == 0) MakeWeak();
+    if (--refs_ == 0)
+      MakeWeak();
   }
 
   int refs_;  // ro
 
-private:
+ private:
   static void WeakCallback(v8::Isolate* isolate,
                            v8::Persistent<v8::Object>* pobj,
                            ObjectWrap* wrap) {
@@ -132,6 +138,6 @@ private:
   v8::Persistent<v8::Object> handle_;
 };
 
-} // namespace node
+}  // namespace node
 
-#endif // object_wrap_h
+#endif  // SRC_NODE_OBJECT_WRAP_H_

@@ -25,7 +25,7 @@
 
 namespace node {
 
-BIO_METHOD NodeBIO::method_ = {
+const BIO_METHOD NodeBIO::method = {
   BIO_TYPE_MEM,
   "node.js SSL buffer",
   NodeBIO::Write,
@@ -37,6 +37,13 @@ BIO_METHOD NodeBIO::method_ = {
   NodeBIO::Free,
   NULL
 };
+
+
+BIO* NodeBIO::New() {
+  // The const_cast doesn't violate const correctness.  OpenSSL's usage of
+  // BIO_METHOD is effectively const but BIO_new() takes a non-const argument.
+  return BIO_new(const_cast<BIO_METHOD*>(&method));
+}
 
 
 int NodeBIO::New(BIO* bio) {
@@ -52,7 +59,8 @@ int NodeBIO::New(BIO* bio) {
 
 
 int NodeBIO::Free(BIO* bio) {
-  if (bio == NULL) return 0;
+  if (bio == NULL)
+    return 0;
 
   if (bio->shutdown) {
     if (bio->init && bio->ptr != NULL) {
@@ -111,10 +119,12 @@ int NodeBIO::Gets(BIO* bio, char* out, int size) {
   int i = nbio->IndexOf('\n', size);
 
   // Include '\n'
-  if (i < size) i++;
+  if (i < size)
+    i++;
 
   // Shift `i` a bit to NULL-terminate string later
-  if (size == i) i--;
+  if (size == i)
+    i--;
 
   // Flush read data
   nbio->Read(out, i);
@@ -133,49 +143,49 @@ long NodeBIO::Ctrl(BIO* bio, int cmd, long num, void* ptr) {
   ret = 1;
 
   switch (cmd) {
-   case BIO_CTRL_RESET:
-    nbio->Reset();
-    break;
-   case BIO_CTRL_EOF:
-    ret = nbio->Length() == 0;
-    break;
-   case BIO_C_SET_BUF_MEM_EOF_RETURN:
-    bio->num = num;
-    break;
-   case BIO_CTRL_INFO:
-    ret = nbio->Length();
-    if (ptr != NULL)
-      *reinterpret_cast<void**>(ptr) = NULL;
-    break;
-   case BIO_C_SET_BUF_MEM:
-    assert(0 && "Can't use SET_BUF_MEM_PTR with NodeBIO");
-    abort();
-    break;
-   case BIO_C_GET_BUF_MEM_PTR:
-    assert(0 && "Can't use GET_BUF_MEM_PTR with NodeBIO");
-    ret = 0;
-    break;
-   case BIO_CTRL_GET_CLOSE:
-    ret = bio->shutdown;
-    break;
-   case BIO_CTRL_SET_CLOSE:
-    bio->shutdown = num;
-    break;
-   case BIO_CTRL_WPENDING:
-    ret = 0;
-    break;
-   case BIO_CTRL_PENDING:
-    ret = nbio->Length();
-    break;
-   case BIO_CTRL_DUP:
-   case BIO_CTRL_FLUSH:
-    ret = 1;
-    break;
-   case BIO_CTRL_PUSH:
-   case BIO_CTRL_POP:
-   default:
-    ret = 0;
-    break;
+    case BIO_CTRL_RESET:
+      nbio->Reset();
+      break;
+    case BIO_CTRL_EOF:
+      ret = nbio->Length() == 0;
+      break;
+    case BIO_C_SET_BUF_MEM_EOF_RETURN:
+      bio->num = num;
+      break;
+    case BIO_CTRL_INFO:
+      ret = nbio->Length();
+      if (ptr != NULL)
+        *reinterpret_cast<void**>(ptr) = NULL;
+      break;
+    case BIO_C_SET_BUF_MEM:
+      assert(0 && "Can't use SET_BUF_MEM_PTR with NodeBIO");
+      abort();
+      break;
+    case BIO_C_GET_BUF_MEM_PTR:
+      assert(0 && "Can't use GET_BUF_MEM_PTR with NodeBIO");
+      ret = 0;
+      break;
+    case BIO_CTRL_GET_CLOSE:
+      ret = bio->shutdown;
+      break;
+    case BIO_CTRL_SET_CLOSE:
+      bio->shutdown = num;
+      break;
+    case BIO_CTRL_WPENDING:
+      ret = 0;
+      break;
+    case BIO_CTRL_PENDING:
+      ret = nbio->Length();
+      break;
+    case BIO_CTRL_DUP:
+    case BIO_CTRL_FLUSH:
+      ret = 1;
+      break;
+    case BIO_CTRL_PUSH:
+    case BIO_CTRL_POP:
+    default:
+      ret = 0;
+      break;
   }
   return ret;
 }
@@ -232,9 +242,12 @@ void NodeBIO::FreeEmpty() {
   if (cur == write_head_ || cur == read_head_)
     return;
 
+  Buffer* prev = child;
   while (cur != read_head_) {
-    // Skip embedded buffer
+    // Skip embedded buffer, and continue deallocating again starting from it
     if (cur == &head_) {
+      prev->next_ = cur;
+      prev = cur;
       cur = head_.next_;
       continue;
     }
@@ -242,11 +255,11 @@ void NodeBIO::FreeEmpty() {
     assert(cur->write_pos_ == cur->read_pos_);
 
     Buffer* next = cur->next_;
-    child->next_ = next;
     delete cur;
-
     cur = next;
   }
+  assert(prev == child || prev == &head_);
+  prev->next_ = cur;
 }
 
 
@@ -387,4 +400,4 @@ NodeBIO::~NodeBIO() {
   write_head_ = NULL;
 }
 
-} // namespace node
+}  // namespace node

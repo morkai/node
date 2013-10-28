@@ -104,9 +104,9 @@ automatically set as a listener for the [secureConnection][] event.  The
   - `cert`: A string or `Buffer` containing the certificate key of the server in
     PEM format. (Required)
 
-  - `ca`: An array of strings or `Buffer`s of trusted certificates. If this is
-    omitted several well known "root" CAs will be used, like VeriSign.
-    These are used to authorize connections.
+  - `ca`: An array of strings or `Buffer`s of trusted certificates in PEM
+    format. If this is omitted several well known "root" CAs will be used,
+    like VeriSign. These are used to authorize connections.
 
   - `crl` : Either a string or list of strings of PEM encoded CRLs (Certificate
     Revocation List)
@@ -156,9 +156,10 @@ automatically set as a listener for the [secureConnection][] event.  The
   - `NPNProtocols`: An array or `Buffer` of possible NPN protocols. (Protocols
     should be ordered by their priority).
 
-  - `SNICallback`: A function that will be called if client supports SNI TLS
-    extension. Only one argument will be passed to it: `servername`. And
-    `SNICallback` should return SecureContext instance.
+  - `SNICallback(servername, cb)`: A function that will be called if client
+    supports SNI TLS extension. Two argument will be passed to it: `servername`,
+    and `cb`. `SNICallback` should invoke `cb(null, ctx)`, where `ctx` is a
+    SecureContext instance.
     (You can use `crypto.createCredentials(...).context` to get proper
     SecureContext). If `SNICallback` wasn't provided - default callback with
     high-level API will be used (see below).
@@ -170,6 +171,10 @@ automatically set as a listener for the [secureConnection][] event.  The
   - `sessionIdContext`: A string containing a opaque identifier for session
     resumption. If `requestCert` is `true`, the default is MD5 hash value
     generated from command-line. Otherwise, the default is not provided.
+
+  - `secureProtocol`: The SSL method to use, e.g. `SSLv3_method` to force
+    SSL version 3. The possible values depend on your installation of
+    OpenSSL and are defined in the constant [SSL_METHODS][].
 
 Here is a simple example echo server:
 
@@ -253,16 +258,16 @@ Creates a new client connection to the given `port` and `host` (old API) or
   - `cert`: A string or `Buffer` containing the certificate key of the client in
     PEM format.
 
-  - `ca`: An array of strings or `Buffer`s of trusted certificates. If this is
-    omitted several well known "root" CAs will be used, like VeriSign.
-    These are used to authorize connections.
+  - `ca`: An array of strings or `Buffer`s of trusted certificates in PEM
+    format. If this is omitted several well known "root" CAs will be used,
+    like VeriSign. These are used to authorize connections.
 
   - `rejectUnauthorized`: If `true`, the server certificate is verified against
     the list of supplied CAs. An `'error'` event is emitted if verification
     fails. Default: `true`.
 
-  - `NPNProtocols`: An array of string or `Buffer` containing supported NPN
-    protocols. `Buffer` should have following format: `0x05hello0x05world`,
+  - `NPNProtocols`: An array of strings or `Buffer`s containing supported NPN
+    protocols. `Buffer`s should have following format: `0x05hello0x05world`,
     where first byte is next protocol name's length. (Passing array should
     usually be much simpler: `['hello', 'world']`.)
 
@@ -572,6 +577,19 @@ Example:
 See SSL_CIPHER_get_name() and SSL_CIPHER_get_version() in
 http://www.openssl.org/docs/ssl/ssl.html#DEALING_WITH_CIPHERS for more
 information.
+
+### tlsSocket.renegotiate(options, callback)
+
+Initiate TLS renegotiation process. The `options` may contain the following
+fields: `rejectUnauthorized`, `requestCert` (See [tls.createServer][]
+for details). `callback(err)` will be executed with `null` as `err`,
+once the renegotiation is successfully completed.
+
+NOTE: Can be used to request peer's certificate after the secure connection
+has been established.
+
+ANOTHER NOTE: When running as the server, socket will be destroyed
+with an error after `handshakeTimeout` timeout.
 
 ### tlsSocket.address()
 

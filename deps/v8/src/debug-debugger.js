@@ -957,12 +957,17 @@ function ExecutionState(break_id) {
   this.selected_frame = 0;
 }
 
-ExecutionState.prototype.prepareStep = function(opt_action, opt_count) {
+ExecutionState.prototype.prepareStep = function(opt_action, opt_count,
+    opt_callframe) {
   var action = Debug.StepAction.StepIn;
   if (!IS_UNDEFINED(opt_action)) action = %ToNumber(opt_action);
   var count = opt_count ? %ToNumber(opt_count) : 1;
+  var callFrameId = 0;
+  if (!IS_UNDEFINED(opt_callframe)) {
+    callFrameId = opt_callframe.details_.frameId();
+  }
 
-  return %PrepareStep(this.break_id, action, count);
+  return %PrepareStep(this.break_id, action, count, callFrameId);
 };
 
 ExecutionState.prototype.evaluateGlobal = function(source, disable_break,
@@ -1469,8 +1474,6 @@ DebugCommandProcessor.prototype.processDebugJSONRequest = function(
         this.suspendRequest_(request, response);
       } else if (request.command == 'version') {
         this.versionRequest_(request, response);
-      } else if (request.command == 'profile') {
-        this.profileRequest_(request, response);
       } else if (request.command == 'changelive') {
         this.changeLiveRequest_(request, response);
       } else if (request.command == 'restartframe') {
@@ -2397,18 +2400,6 @@ DebugCommandProcessor.prototype.versionRequest_ = function(request, response) {
   response.body = {
     V8Version: %GetV8Version()
   };
-};
-
-
-DebugCommandProcessor.prototype.profileRequest_ = function(request, response) {
-  if (request.arguments.command == 'resume') {
-    %ProfilerResume();
-  } else if (request.arguments.command == 'pause') {
-    %ProfilerPause();
-  } else {
-    return response.failed('Unknown command');
-  }
-  response.body = {};
 };
 
 

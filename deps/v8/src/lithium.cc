@@ -270,7 +270,7 @@ int StackSlotOffset(int index) {
     return -(index + 3) * kPointerSize;
   } else {
     // Incoming parameter. Skip the return address.
-    return -(index - 1) * kPointerSize;
+    return -(index + 1) * kPointerSize + kFPOnStackSize + kPCOnStackSize;
   }
 }
 
@@ -305,6 +305,7 @@ Label* LChunk::GetAssemblyLabel(int block_id) const {
   ASSERT(!label->HasReplacement());
   return label->label();
 }
+
 
 void LChunk::MarkEmptyBlocks() {
   LPhase phase("L_Mark empty blocks", this);
@@ -424,7 +425,7 @@ LChunk* LChunk::NewChunk(HGraph* graph) {
   int values = graph->GetMaximumValueID();
   CompilationInfo* info = graph->info();
   if (values > LUnallocated::kMaxVirtualRegisters) {
-    info->set_bailout_reason("not enough virtual registers for values");
+    info->set_bailout_reason(kNotEnoughVirtualRegistersForValues);
     return NULL;
   }
   LAllocator allocator(values, graph);
@@ -433,7 +434,7 @@ LChunk* LChunk::NewChunk(HGraph* graph) {
   if (chunk == NULL) return NULL;
 
   if (!allocator.Allocate(chunk)) {
-    info->set_bailout_reason("not enough virtual registers (regalloc)");
+    info->set_bailout_reason(kNotEnoughVirtualRegistersRegalloc);
     return NULL;
   }
 
@@ -460,12 +461,10 @@ Handle<Code> LChunk::Codegen() {
         CodeGenerator::MakeCodeEpilogue(&assembler, flags, info());
     generator.FinishCode(code);
     code->set_is_crankshafted(true);
-    if (!code.is_null()) {
-      void* jit_handler_data =
-          assembler.positions_recorder()->DetachJITHandlerData();
-      LOG_CODE_EVENT(info()->isolate(),
-                     CodeEndLinePosInfoRecordEvent(*code, jit_handler_data));
-    }
+    void* jit_handler_data =
+        assembler.positions_recorder()->DetachJITHandlerData();
+    LOG_CODE_EVENT(info()->isolate(),
+                   CodeEndLinePosInfoRecordEvent(*code, jit_handler_data));
 
     CodeGenerator::PrintCode(code, info());
     return code;

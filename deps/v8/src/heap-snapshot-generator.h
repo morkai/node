@@ -100,7 +100,9 @@ class HeapEntry BASE_EMBEDDED {
     kRegExp = v8::HeapGraphNode::kRegExp,
     kHeapNumber = v8::HeapGraphNode::kHeapNumber,
     kNative = v8::HeapGraphNode::kNative,
-    kSynthetic = v8::HeapGraphNode::kSynthetic
+    kSynthetic = v8::HeapGraphNode::kSynthetic,
+    kConsString = v8::HeapGraphNode::kConsString,
+    kSlicedString = v8::HeapGraphNode::kSlicedString
   };
   static const int kNoEntry;
 
@@ -235,7 +237,7 @@ class HeapObjectsMap {
   SnapshotObjectId PushHeapObjectsStats(OutputStream* stream);
   size_t GetUsedMemorySize() const;
 
-  static SnapshotObjectId GenerateId(v8::RetainedObjectInfo* info);
+  static SnapshotObjectId GenerateId(Heap* heap, v8::RetainedObjectInfo* info);
   static inline SnapshotObjectId GetNthGcSubrootId(int delta);
 
   static const int kObjectIdStep = 2;
@@ -265,16 +267,6 @@ class HeapObjectsMap {
 
   void UpdateHeapObjectsMap();
   void RemoveDeadEntries();
-
-  static bool AddressesMatch(void* key1, void* key2) {
-    return key1 == key2;
-  }
-
-  static uint32_t AddressHash(Address addr) {
-    return ComputeIntegerHash(
-        static_cast<uint32_t>(reinterpret_cast<uintptr_t>(addr)),
-        v8::internal::kZeroHashSeed);
-  }
 
   SnapshotObjectId next_id_;
   HashMap entries_map_;
@@ -306,7 +298,6 @@ class HeapSnapshotsCollection {
   void RemoveSnapshot(HeapSnapshot* snapshot);
 
   StringsStorage* names() { return &names_; }
-  TokenEnumerator* token_enumerator() { return token_enumerator_; }
 
   SnapshotObjectId FindObjectId(Address object_addr) {
     return ids_.FindEntry(object_addr);
@@ -325,7 +316,6 @@ class HeapSnapshotsCollection {
   bool is_tracking_objects_;  // Whether tracking object moves is needed.
   List<HeapSnapshot*> snapshots_;
   StringsStorage names_;
-  TokenEnumerator* token_enumerator_;
   // Mapping from HeapObject addresses to objects' uids.
   HeapObjectsMap ids_;
 
@@ -462,6 +452,7 @@ class V8HeapExplorer : public HeapEntriesAllocator {
   void ExtractCodeReferences(int entry, Code* code);
   void ExtractCellReferences(int entry, Cell* cell);
   void ExtractPropertyCellReferences(int entry, PropertyCell* cell);
+  void ExtractAllocationSiteReferences(int entry, AllocationSite* site);
   void ExtractClosureReferences(JSObject* js_obj, int entry);
   void ExtractPropertyReferences(JSObject* js_obj, int entry);
   bool ExtractAccessorPairProperty(JSObject* js_obj, int entry,
@@ -549,7 +540,7 @@ class NativeGroupRetainedObjectInfo;
 class NativeObjectsExplorer {
  public:
   NativeObjectsExplorer(HeapSnapshot* snapshot,
-                      SnapshottingProgressReportingInterface* progress);
+                        SnapshottingProgressReportingInterface* progress);
   virtual ~NativeObjectsExplorer();
   void AddRootEntries(SnapshotFillerInterface* filler);
   int EstimateObjectsCount();
@@ -581,6 +572,7 @@ class NativeObjectsExplorer {
 
   NativeGroupRetainedObjectInfo* FindOrAddGroupInfo(const char* label);
 
+  Isolate* isolate_;
   HeapSnapshot* snapshot_;
   HeapSnapshotsCollection* collection_;
   SnapshottingProgressReportingInterface* progress_;

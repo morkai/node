@@ -19,50 +19,48 @@
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
 // USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-#ifndef NODE_WRAP_H
-#define NODE_WRAP_H
+#ifndef SRC_NODE_WRAP_H_
+#define SRC_NODE_WRAP_H_
 
-#include "v8.h"
-#include "uv.h"
-
+#include "env.h"
+#include "env-inl.h"
 #include "pipe_wrap.h"
-#include "tty_wrap.h"
 #include "tcp_wrap.h"
+#include "tty_wrap.h"
 #include "udp_wrap.h"
+#include "uv.h"
+#include "v8.h"
 
 namespace node {
 
-extern v8::Persistent<v8::FunctionTemplate> pipeConstructorTmpl;
-extern v8::Persistent<v8::FunctionTemplate> ttyConstructorTmpl;
-extern v8::Persistent<v8::FunctionTemplate> tcpConstructorTmpl;
-
-#define WITH_GENERIC_STREAM(obj, BODY)                    \
-    do {                                                  \
-      if (!tcpConstructorTmpl.IsEmpty() &&                \
-          HasInstance(tcpConstructorTmpl, obj)) {         \
-        PipeWrap* wrap = PipeWrap::Unwrap(obj);           \
-        BODY                                              \
-      } else if (!ttyConstructorTmpl.IsEmpty() &&         \
-                 HasInstance(ttyConstructorTmpl, obj)) {  \
-        TTYWrap* wrap = TTYWrap::Unwrap(obj);             \
-        BODY                                              \
-      } else if (!pipeConstructorTmpl.IsEmpty() &&        \
-                 HasInstance(pipeConstructorTmpl, obj)) { \
-        TCPWrap* wrap = TCPWrap::Unwrap(obj);             \
-        BODY                                              \
-      }                                                   \
+#define WITH_GENERIC_STREAM(env, obj, BODY)                                   \
+    do {                                                                      \
+      if (env->tcp_constructor_template().IsEmpty() == false &&               \
+          env->tcp_constructor_template()->HasInstance(obj)) {                \
+        TCPWrap* const wrap = TCPWrap::Unwrap(obj);                           \
+        BODY                                                                  \
+      } else if (env->tty_constructor_template().IsEmpty() == false &&        \
+                 env->tty_constructor_template()->HasInstance(obj)) {         \
+        TTYWrap* const wrap = TTYWrap::Unwrap(obj);                           \
+        BODY                                                                  \
+      } else if (env->pipe_constructor_template().IsEmpty() == false &&       \
+                 env->pipe_constructor_template()->HasInstance(obj)) {        \
+        PipeWrap* const wrap = PipeWrap::Unwrap(obj);                         \
+        BODY                                                                  \
+      }                                                                       \
     } while (0)
 
-inline uv_stream_t* HandleToStream(v8::Local<v8::Object> obj) {
+inline uv_stream_t* HandleToStream(Environment* env,
+                                   v8::Local<v8::Object> obj) {
   v8::HandleScope scope(node_isolate);
 
-  WITH_GENERIC_STREAM(obj, {
+  WITH_GENERIC_STREAM(env, obj, {
     return reinterpret_cast<uv_stream_t*>(wrap->UVHandle());
   });
 
   return NULL;
 }
 
-}
+}  // namespace node
 
-#endif
+#endif  // SRC_NODE_WRAP_H_

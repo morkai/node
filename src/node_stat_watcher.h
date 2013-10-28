@@ -19,22 +19,25 @@
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
 // USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-#ifndef NODE_STAT_WATCHER_H_
-#define NODE_STAT_WATCHER_H_
+#ifndef SRC_NODE_STAT_WATCHER_H_
+#define SRC_NODE_STAT_WATCHER_H_
 
-#include "node.h"
+#include "node_object_wrap.h"
+
+#include "env.h"
 #include "uv.h"
+#include "v8.h"
+#include "weak-object.h"
 
 namespace node {
 
-class StatWatcher : ObjectWrap {
+class StatWatcher : public WeakObject {
  public:
   static void Initialize(v8::Handle<v8::Object> target);
+  inline Environment* env() const { return env_; }
 
  protected:
-  static v8::Persistent<v8::FunctionTemplate> constructor_template;
-
-  StatWatcher();
+  StatWatcher(Environment* env, v8::Local<v8::Object> wrap);
   virtual ~StatWatcher();
 
   static void New(const v8::FunctionCallbackInfo<v8::Value>& args);
@@ -49,7 +52,8 @@ class StatWatcher : ObjectWrap {
   void Stop();
 
   uv_fs_poll_t* watcher_;
+  Environment* const env_;
 };
 
 }  // namespace node
-#endif  // NODE_STAT_WATCHER_H_
+#endif  // SRC_NODE_STAT_WATCHER_H_

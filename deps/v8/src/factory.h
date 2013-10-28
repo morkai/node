@@ -243,6 +243,8 @@ class Factory {
 
   Handle<PropertyCell> NewPropertyCell(Handle<Object> value);
 
+  Handle<AllocationSite> NewAllocationSite();
+
   Handle<Map> NewMap(
       InstanceType type,
       int instance_size,
@@ -299,7 +301,11 @@ class Factory {
   // JS objects are pretenured when allocated by the bootstrapper and
   // runtime.
   Handle<JSObject> NewJSObjectFromMap(Handle<Map> map,
-                                      PretenureFlag pretenure = NOT_TENURED);
+                                      PretenureFlag pretenure = NOT_TENURED,
+                                      bool allocate_properties = true);
+
+  Handle<JSObject> NewJSObjectFromMapForDeoptimizer(
+      Handle<Map> map, PretenureFlag pretenure = NOT_TENURED);
 
   // JS modules are pretenured.
   Handle<JSModule> NewJSModule(Handle<Context> context,
@@ -322,7 +328,6 @@ class Factory {
 
   void SetContent(Handle<JSArray> array, Handle<FixedArrayBase> elements);
 
-  void EnsureCanContainHeapObjectElements(Handle<JSArray> array);
   void EnsureCanContainElements(Handle<JSArray> array,
                                 Handle<FixedArrayBase> elements,
                                 uint32_t length,
@@ -339,8 +344,6 @@ class Factory {
   // Change the type of the argument into a JS object/function and reinitialize.
   void BecomeJSObject(Handle<JSReceiver> object);
   void BecomeJSFunction(Handle<JSReceiver> object);
-
-  void SetIdentityHash(Handle<JSObject> object, Smi* hash);
 
   Handle<JSFunction> NewFunction(Handle<String> name,
                                  Handle<Object> prototype);
@@ -563,6 +566,100 @@ Handle<Object> Factory::NewNumberFromSize(size_t value,
   }
 }
 
+
+// Used to "safely" transition from pointer-based runtime code to Handle-based
+// runtime code. When a GC happens during the called Handle-based code, a
+// failure object is returned to the pointer-based code to cause it abort and
+// re-trigger a gc of it's own. Since this double-gc will cause the Handle-based
+// code to be called twice, it must be idempotent.
+class IdempotentPointerToHandleCodeTrampoline {
+ public:
+  explicit IdempotentPointerToHandleCodeTrampoline(Isolate* isolate)
+      : isolate_(isolate) {}
+
+  template<typename R>
+  MUST_USE_RESULT MaybeObject* Call(R (*function)()) {
+    int collections = isolate_->heap()->gc_count();
+    (*function)();
+    return (collections == isolate_->heap()->gc_count())
+        ? isolate_->heap()->true_value()
+        : reinterpret_cast<MaybeObject*>(Failure::RetryAfterGC());
+  }
+
+  template<typename R>
+  MUST_USE_RESULT MaybeObject* CallWithReturnValue(R (*function)()) {
+    int collections = isolate_->heap()->gc_count();
+    Object* result = (*function)();
+    return (collections == isolate_->heap()->gc_count())
+        ? result
+        : reinterpret_cast<MaybeObject*>(Failure::RetryAfterGC());
+  }
+
+  template<typename R, typename P1>
+  MUST_USE_RESULT MaybeObject* Call(R (*function)(P1), P1 p1) {
+    int collections = isolate_->heap()->gc_count();
+    (*function)(p1);
+    return (collections == isolate_->heap()->gc_count())
+        ? isolate_->heap()->true_value()
+        : reinterpret_cast<MaybeObject*>(Failure::RetryAfterGC());
+  }
+
+  template<typename R, typename P1>
+  MUST_USE_RESULT MaybeObject* CallWithReturnValue(
+      R (*function)(P1),
+      P1 p1) {
+    int collections = isolate_->heap()->gc_count();
+    Object* result = (*function)(p1);
+    return (collections == isolate_->heap()->gc_count())
+        ? result
+        : reinterpret_cast<MaybeObject*>(Failure::RetryAfterGC());
+  }
+
+  template<typename R, typename P1, typename P2>
+  MUST_USE_RESULT MaybeObject* Call(
+      R (*function)(P1, P2),
+      P1 p1,
+      P2 p2) {
+    int collections = isolate_->heap()->gc_count();
+    (*function)(p1, p2);
+    return (collections == isolate_->heap()->gc_count())
+        ? isolate_->heap()->true_value()
+        : reinterpret_cast<MaybeObject*>(Failure::RetryAfterGC());
+  }
+
+  template<typename R, typename P1, typename P2>
+  MUST_USE_RESULT MaybeObject* CallWithReturnValue(
+      R (*function)(P1, P2),
+      P1 p1,
+      P2 p2) {
+    int collections = isolate_->heap()->gc_count();
+    Object* result = (*function)(p1, p2);
+    return (collections == isolate_->heap()->gc_count())
+        ? result
+        : reinterpret_cast<MaybeObject*>(Failure::RetryAfterGC());
+  }
+
+  template<typename R, typename P1, typename P2, typename P3, typename P4,
+           typename P5, typename P6, typename P7>
+  MUST_USE_RESULT MaybeObject* CallWithReturnValue(
+      R (*function)(P1, P2, P3, P4, P5, P6, P7),
+      P1 p1,
+      P2 p2,
+      P3 p3,
+      P4 p4,
+      P5 p5,
+      P6 p6,
+      P7 p7) {
+    int collections = isolate_->heap()->gc_count();
+    Handle<Object> result = (*function)(p1, p2, p3, p4, p5, p6, p7);
+    return (collections == isolate_->heap()->gc_count())
+        ? *result
+        : reinterpret_cast<MaybeObject*>(Failure::RetryAfterGC());
+  }
+
+ private:
+  Isolate* isolate_;
+};
 
 
 } }  // namespace v8::internal

@@ -19,15 +19,18 @@
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
 // USE OR OTHER DEALINGS IN THE SOFTWARE.
 
+#ifndef SRC_NODE_BUFFER_H_
+#define SRC_NODE_BUFFER_H_
+
 #include "node.h"
 #include "smalloc.h"
 #include "v8.h"
 
-#ifndef NODE_BUFFER_H_
-#define NODE_BUFFER_H_
+#if defined(NODE_WANT_INTERNALS)
+#include "env.h"
+#endif  // defined(NODE_WANT_INTERNALS)
 
 namespace node {
-
 namespace Buffer {
 
 static const unsigned int kMaxLength = smalloc::kMaxLength;
@@ -57,8 +60,21 @@ NODE_EXTERN v8::Local<v8::Object> New(char* data,
 // TODO(trevnorris): should be New() for consistency
 NODE_EXTERN v8::Local<v8::Object> Use(char* data, uint32_t len);
 
-}  // namespace Buffer
+// Internal. Not for public consumption. We can't define these in
+// src/node_internals.h due to a circular dependency issue with
+// the smalloc.h and node_internals.h headers.
+#if defined(NODE_WANT_INTERNALS)
+v8::Local<v8::Object> New(Environment* env, size_t size);
+v8::Local<v8::Object> New(Environment* env, const char* data, size_t len);
+v8::Local<v8::Object> New(Environment* env,
+                          char* data,
+                          size_t length,
+                          smalloc::FreeCallback callback,
+                          void* hint);
+v8::Local<v8::Object> Use(Environment* env, char* data, uint32_t length);
+#endif  // defined(NODE_WANT_INTERNALS)
 
+}  // namespace Buffer
 }  // namespace node
 
-#endif  // NODE_BUFFER_H_
+#endif  // SRC_NODE_BUFFER_H_

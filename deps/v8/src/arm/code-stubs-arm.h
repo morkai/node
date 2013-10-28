@@ -68,7 +68,7 @@ class StoreBufferOverflowStub: public PlatformCodeStub {
 
   void Generate(MacroAssembler* masm);
 
-  virtual bool IsPregenerated() { return true; }
+  virtual bool IsPregenerated(Isolate* isolate) V8_OVERRIDE { return true; }
   static void GenerateFixedRegStubsAheadOfTime(Isolate* isolate);
   virtual bool SometimesSetsUpAFrame() { return false; }
 
@@ -77,71 +77,6 @@ class StoreBufferOverflowStub: public PlatformCodeStub {
 
   Major MajorKey() { return StoreBufferOverflow; }
   int MinorKey() { return (save_doubles_ == kSaveFPRegs) ? 1 : 0; }
-};
-
-
-class UnaryOpStub: public PlatformCodeStub {
- public:
-  UnaryOpStub(Token::Value op,
-              UnaryOverwriteMode mode,
-              UnaryOpIC::TypeInfo operand_type = UnaryOpIC::UNINITIALIZED)
-      : op_(op),
-        mode_(mode),
-        operand_type_(operand_type) {
-  }
-
- private:
-  Token::Value op_;
-  UnaryOverwriteMode mode_;
-
-  // Operand type information determined at runtime.
-  UnaryOpIC::TypeInfo operand_type_;
-
-  virtual void PrintName(StringStream* stream);
-
-  class ModeBits: public BitField<UnaryOverwriteMode, 0, 1> {};
-  class OpBits: public BitField<Token::Value, 1, 7> {};
-  class OperandTypeInfoBits: public BitField<UnaryOpIC::TypeInfo, 8, 3> {};
-
-  Major MajorKey() { return UnaryOp; }
-  int MinorKey() {
-    return ModeBits::encode(mode_)
-           | OpBits::encode(op_)
-           | OperandTypeInfoBits::encode(operand_type_);
-  }
-
-  // Note: A lot of the helper functions below will vanish when we use virtual
-  // function instead of switch more often.
-  void Generate(MacroAssembler* masm);
-
-  void GenerateTypeTransition(MacroAssembler* masm);
-
-  void GenerateSmiStub(MacroAssembler* masm);
-  void GenerateSmiStubSub(MacroAssembler* masm);
-  void GenerateSmiStubBitNot(MacroAssembler* masm);
-  void GenerateSmiCodeSub(MacroAssembler* masm, Label* non_smi, Label* slow);
-  void GenerateSmiCodeBitNot(MacroAssembler* masm, Label* slow);
-
-  void GenerateNumberStub(MacroAssembler* masm);
-  void GenerateNumberStubSub(MacroAssembler* masm);
-  void GenerateNumberStubBitNot(MacroAssembler* masm);
-  void GenerateHeapNumberCodeSub(MacroAssembler* masm, Label* slow);
-  void GenerateHeapNumberCodeBitNot(MacroAssembler* masm, Label* slow);
-
-  void GenerateGenericStub(MacroAssembler* masm);
-  void GenerateGenericStubSub(MacroAssembler* masm);
-  void GenerateGenericStubBitNot(MacroAssembler* masm);
-  void GenerateGenericCodeFallback(MacroAssembler* masm);
-
-  virtual Code::Kind GetCodeKind() const { return Code::UNARY_OP_IC; }
-
-  virtual InlineCacheState GetICState() {
-    return UnaryOpIC::ToState(operand_type_);
-  }
-
-  virtual void FinishCode(Handle<Code> code) {
-    code->set_unary_op_type(operand_type_);
-  }
 };
 
 
@@ -206,21 +141,6 @@ class StringHelper : public AllStatic {
 
  private:
   DISALLOW_IMPLICIT_CONSTRUCTORS(StringHelper);
-};
-
-
-// Flag that indicates how to generate code for the stub StringAddStub.
-enum StringAddFlags {
-  NO_STRING_ADD_FLAGS = 1 << 0,
-  // Omit left string check in stub (left is definitely a string).
-  NO_STRING_CHECK_LEFT_IN_STUB = 1 << 1,
-  // Omit right string check in stub (right is definitely a string).
-  NO_STRING_CHECK_RIGHT_IN_STUB = 1 << 2,
-  // Stub needs a frame before calling the runtime
-  ERECT_FRAME = 1 << 3,
-  // Omit both string checks in stub.
-  NO_STRING_CHECK_IN_STUB =
-      NO_STRING_CHECK_LEFT_IN_STUB | NO_STRING_CHECK_RIGHT_IN_STUB
 };
 
 
@@ -312,7 +232,7 @@ class WriteInt32ToHeapNumberStub : public PlatformCodeStub {
         the_heap_number_(the_heap_number),
         scratch_(scratch) { }
 
-  bool IsPregenerated();
+  virtual bool IsPregenerated(Isolate* isolate) V8_OVERRIDE;
   static void GenerateFixedRegStubsAheadOfTime(Isolate* isolate);
 
  private:
@@ -352,7 +272,6 @@ class NumberToStringStub: public PlatformCodeStub {
                                               Register scratch1,
                                               Register scratch2,
                                               Register scratch3,
-                                              bool object_is_smi,
                                               Label* not_found);
 
  private:
@@ -386,7 +305,7 @@ class RecordWriteStub: public PlatformCodeStub {
     INCREMENTAL_COMPACTION
   };
 
-  virtual bool IsPregenerated();
+  virtual bool IsPregenerated(Isolate* isolate) V8_OVERRIDE;
   static void GenerateFixedRegStubsAheadOfTime(Isolate* isolate);
   virtual bool SometimesSetsUpAFrame() { return false; }
 
@@ -457,7 +376,7 @@ class RecordWriteStub: public PlatformCodeStub {
           address_(address),
           scratch0_(scratch0) {
       ASSERT(!AreAliased(scratch0, object, address, no_reg));
-      scratch1_ = GetRegThatIsNotOneOf(object_, address_, scratch0_);
+      scratch1_ = GetRegisterThatIsNotOneOf(object_, address_, scratch0_);
     }
 
     void Save(MacroAssembler* masm) {
@@ -500,19 +419,6 @@ class RecordWriteStub: public PlatformCodeStub {
     Register scratch0_;
     Register scratch1_;
 
-    Register GetRegThatIsNotOneOf(Register r1,
-                                  Register r2,
-                                  Register r3) {
-      for (int i = 0; i < Register::NumAllocatableRegisters(); i++) {
-        Register candidate = Register::FromAllocationIndex(i);
-        if (candidate.is(r1)) continue;
-        if (candidate.is(r2)) continue;
-        if (candidate.is(r3)) continue;
-        return candidate;
-      }
-      UNREACHABLE();
-      return no_reg;
-    }
     friend class RecordWriteStub;
   };
 
@@ -556,23 +462,6 @@ class RecordWriteStub: public PlatformCodeStub {
   SaveFPRegsMode save_fp_regs_mode_;
   Label slow_;
   RegisterAllocation regs_;
-};
-
-
-// Enter C code from generated RegExp code in a way that allows
-// the C code to fix the return address in case of a GC.
-// Currently only needed on ARM.
-class RegExpCEntryStub: public PlatformCodeStub {
- public:
-  RegExpCEntryStub() {}
-  virtual ~RegExpCEntryStub() {}
-  void Generate(MacroAssembler* masm);
-
- private:
-  Major MajorKey() { return RegExpCEntry; }
-  int MinorKey() { return 0; }
-
-  bool NeedsImmovableCode() { return true; }
 };
 
 

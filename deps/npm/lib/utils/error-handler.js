@@ -44,7 +44,7 @@ process.on("exit", function (code) {
 })
 
 function exit (code, noLog) {
-  exitCode = exitCode || code
+  exitCode = exitCode || process.exitCode || code
 
   var doExit = npm.config.get("_exit")
   log.verbose("exit", [code, doExit])
@@ -224,7 +224,9 @@ function errorHandler (er) {
     log.error("peerinvalid", [er.message].concat(peerErrors).join("\n"))
     break
 
+  case "ECONNRESET":
   case "ENOTFOUND":
+  case "ETIMEDOUT":
     log.error("network", [er.message
               ,"This is most likely not a problem with npm itself"
               ,"and is related to network connectivity."

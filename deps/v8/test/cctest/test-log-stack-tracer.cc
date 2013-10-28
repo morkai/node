@@ -157,7 +157,7 @@ void TraceExtension::JSTrace(const v8::FunctionCallbackInfo<v8::Value>& args) {
 
 static Address GetJsEntrySp() {
   CHECK_NE(NULL, i::Isolate::Current()->thread_local_top());
-  return Isolate::js_entry_sp(i::Isolate::Current()->thread_local_top());
+  return i::Isolate::Current()->js_entry_sp();
 }
 
 
@@ -185,6 +185,7 @@ static bool IsAddressWithinFuncCode(JSFunction* function, Address addr) {
   i::Code* code = function->code();
   return code->contains(addr);
 }
+
 
 static bool IsAddressWithinFuncCode(const char* func_name, Address addr) {
   v8::Local<v8::Value> func = CcTest::env()->Global()->Get(v8_str(func_name));

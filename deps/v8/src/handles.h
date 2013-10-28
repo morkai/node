@@ -106,6 +106,13 @@ inline Handle<T> handle(T* t, Isolate* isolate) {
 }
 
 
+// Convenience wrapper.
+template<class T>
+inline Handle<T> handle(T* t) {
+  return Handle<T>(t, t->GetIsolate());
+}
+
+
 class DeferredHandles;
 class HandleScopeImplementer;
 
@@ -252,8 +259,6 @@ Handle<JSObject> Copy(Handle<JSObject> obj);
 
 Handle<JSObject> DeepCopy(Handle<JSObject> obj);
 
-Handle<Object> SetAccessor(Handle<JSObject> obj, Handle<AccessorInfo> info);
-
 Handle<FixedArray> AddKeysFromJSArray(Handle<FixedArray>,
                                       Handle<JSArray> array);
 
@@ -306,9 +311,6 @@ Handle<String> SubString(Handle<String> str,
 // Sets the expected number of properties for the function's instances.
 void SetExpectedNofProperties(Handle<JSFunction> func, int nof);
 
-// Sets the prototype property for a function instance.
-void SetPrototypeProperty(Handle<JSFunction> func, Handle<JSObject> value);
-
 // Sets the expected number of properties based on estimate from compiler.
 void SetExpectedNofPropertiesFromEstimate(Handle<SharedFunctionInfo> shared,
                                           int estimate);
@@ -317,9 +319,6 @@ void SetExpectedNofPropertiesFromEstimate(Handle<SharedFunctionInfo> shared,
 Handle<JSGlobalProxy> ReinitializeJSGlobalProxy(
     Handle<JSFunction> constructor,
     Handle<JSGlobalProxy> global);
-
-Handle<Object> SetPrototype(Handle<JSFunction> function,
-                            Handle<Object> prototype);
 
 Handle<ObjectHashSet> ObjectHashSetAdd(Handle<ObjectHashSet> table,
                                        Handle<Object> key);

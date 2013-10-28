@@ -28,7 +28,8 @@ Returns the operating system platform.
 
 ## os.arch()
 
-Returns the operating system CPU architecture.
+Returns the operating system CPU architecture. Possible values are `"x64"`,
+`"arm"` and `"ia32"`.
 
 ## os.release()
 
@@ -41,6 +42,14 @@ Returns the system uptime in seconds.
 ## os.loadavg()
 
 Returns an array containing the 1, 5, and 15 minute load averages.
+
+The load average is a measure of system activity, calculated by the operating
+system and expressed as a fractional number.  As a rule of thumb, the load
+average should ideally be less than the number of logical CPUs in the system.
+
+The load average is a very UNIX-y concept; there is no real equivalent on
+Windows platforms.  That is why this function always returns `[0, 0, 0]` on
+Windows.
 
 ## os.totalmem()
 
@@ -127,24 +136,28 @@ Example inspection of os.cpus:
 
 Get a list of network interfaces:
 
-    { lo0:
-       [ { address: 'fe80::1', netmask: 'ffff:ffff:ffff:ffff::',
-           family: 'IPv6', internal: true },
-         { address: '127.0.0.1', netmask: '255.0.0.0',
-           family: 'IPv4', internal: true },
-         { address: '::1', netmask: 'ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff',
-           family: 'IPv6', internal: true } ],
-      en1:
-       [ { address: 'fe80::226:8ff:fedc:1dd', netmask: 'ffff:ffff:ffff:ffff::',
-           family: 'IPv6', internal: false },
-         { address: '10.0.1.6', netmask: '255.255.255.0',
-           family: 'IPv4', internal: false } ],
-      vmnet1:
-       [ { address: '192.168.252.1', netmask: '255.255.255.0',
-           family: 'IPv4', internal: false } ],
-      vmnet8:
-       [ { address: '192.168.207.1', netmask: '255.255.255.0',
-           family: 'IPv4', internal: false } ] }
+    { lo:
+       [ { address: '127.0.0.1',
+           netmask: '255.0.0.0',
+           family: 'IPv4',
+           mac: '00:00:00:00:00:00',
+           internal: true },
+         { address: '::1',
+           netmask: 'ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff',
+           family: 'IPv6',
+           mac: '00:00:00:00:00:00',
+           internal: true } ],
+      eth0:
+       [ { address: '192.168.1.108',
+           netmask: '255.255.255.0',
+           family: 'IPv4',
+           mac: '01:02:03:0a:0b:0c',
+           internal: false },
+         { address: 'fe80::a00:27ff:fe4e:66a1',
+           netmask: 'ffff:ffff:ffff:ffff::',
+           family: 'IPv6',
+           mac: '01:02:03:0a:0b:0c',
+           internal: false } ] }
 
 ## os.EOL
 

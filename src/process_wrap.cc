@@ -19,7 +19,8 @@
 // OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
 // USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-#include "node.h"
+#include "env.h"
+#include "env-inl.h"
 #include "handle_wrap.h"
 #include "node_wrap.h"
 
@@ -29,6 +30,7 @@
 namespace node {
 
 using v8::Array;
+using v8::Context;
 using v8::Function;
 using v8::FunctionCallbackInfo;
 using v8::FunctionTemplate;
@@ -41,18 +43,14 @@ using v8::Object;
 using v8::String;
 using v8::Value;
 
-static Cached<String> onexit_sym;
-
 class ProcessWrap : public HandleWrap {
  public:
-  static void Initialize(Handle<Object> target) {
-    HandleScope scope(node_isolate);
-
-    HandleWrap::Initialize(target);
-
+  static void Initialize(Handle<Object> target,
+                         Handle<Value> unused,
+                         Handle<Context> context) {
     Local<FunctionTemplate> constructor = FunctionTemplate::New(New);
     constructor->InstanceTemplate()->SetInternalFieldCount(1);
-    constructor->SetClassName(String::NewSymbol("Process"));
+    constructor->SetClassName(FIXED_ONE_BYTE_STRING(node_isolate, "Process"));
 
     NODE_SET_PROTOTYPE_METHOD(constructor, "close", HandleWrap::Close);
 
@@ -62,7 +60,8 @@ class ProcessWrap : public HandleWrap {
     NODE_SET_PROTOTYPE_METHOD(constructor, "ref", HandleWrap::Ref);
     NODE_SET_PROTOTYPE_METHOD(constructor, "unref", HandleWrap::Unref);
 
-    target->Set(String::NewSymbol("Process"), constructor->GetFunction());
+    target->Set(FIXED_ONE_BYTE_STRING(node_isolate, "Process"),
+                constructor->GetFunction());
   }
 
  private:
@@ -71,49 +70,57 @@ class ProcessWrap : public HandleWrap {
     // Therefore we assert that we are not trying to call this as a
     // normal function.
     assert(args.IsConstructCall());
-    HandleScope scope(node_isolate);
-    new ProcessWrap(args.This());
+    Environment* env = Environment::GetCurrent(args.GetIsolate());
+    HandleScope handle_scope(args.GetIsolate());
+    new ProcessWrap(env, args.This());
   }
 
-  ProcessWrap(Handle<Object> object)
-      : HandleWrap(object, reinterpret_cast<uv_handle_t*>(&process_)) {
+  ProcessWrap(Environment* env, Handle<Object> object)
+      : HandleWrap(env, object, reinterpret_cast<uv_handle_t*>(&process_)) {
   }
 
   ~ProcessWrap() {
   }
 
-  static void ParseStdioOptions(Local<Object> js_options,
+  static void ParseStdioOptions(Environment* env,
+                                Local<Object> js_options,
                                 uv_process_options_t* options) {
-    Local<Array> stdios = js_options
-        ->Get(String::NewSymbol("stdio")).As<Array>();
-    int len = stdios->Length();
+    Local<String> stdio_key =
+        FIXED_ONE_BYTE_STRING(node_isolate, "stdio");
+    Local<Array> stdios = js_options->Get(stdio_key).As<Array>();
+
+    uint32_t len = stdios->Length();
     options->stdio = new uv_stdio_container_t[len];
     options->stdio_count = len;
 
-    for (int i = 0; i < len; i++) {
-      Local<Object> stdio = stdios
-          ->Get(Number::New(static_cast<double>(i))).As<Object>();
-      Local<Value> type = stdio->Get(String::NewSymbol("type"));
+    for (uint32_t i = 0; i < len; i++) {
+      Local<Object> stdio = stdios->Get(i).As<Object>();
+      Local<Value> type =
+          stdio->Get(FIXED_ONE_BYTE_STRING(node_isolate, "type"));
 
-      if (type->Equals(String::NewSymbol("ignore"))) {
+      if (type->Equals(FIXED_ONE_BYTE_STRING(node_isolate, "ignore"))) {
         options->stdio[i].flags = UV_IGNORE;
-      } else if (type->Equals(String::NewSymbol("pipe"))) {
+      } else if (type->Equals(FIXED_ONE_BYTE_STRING(node_isolate, "pipe"))) {
         options->stdio[i].flags = static_cast<uv_stdio_flags>(
             UV_CREATE_PIPE | UV_READABLE_PIPE | UV_WRITABLE_PIPE);
-        options->stdio[i].data.stream = reinterpret_cast<uv_stream_t*>(
-            PipeWrap::Unwrap(stdio
-                ->Get(String::NewSymbol("handle")).As<Object>())->UVHandle());
-      } else if (type->Equals(String::NewSymbol("wrap"))) {
-        uv_stream_t* stream = HandleToStream(
-            stdio->Get(String::NewSymbol("handle")).As<Object>());
+        Local<String> handle_key =
+            FIXED_ONE_BYTE_STRING(node_isolate, "handle");
+        Local<Object> handle = stdio->Get(handle_key).As<Object>();
+        options->stdio[i].data.stream =
+            reinterpret_cast<uv_stream_t*>(
+                PipeWrap::Unwrap(handle)->UVHandle());
+      } else if (type->Equals(FIXED_ONE_BYTE_STRING(node_isolate, "wrap"))) {
+        Local<String> handle_key =
+            FIXED_ONE_BYTE_STRING(node_isolate, "handle");
+        Local<Object> handle = stdio->Get(handle_key).As<Object>();
+        uv_stream_t* stream = HandleToStream(env, handle);
         assert(stream != NULL);
 
         options->stdio[i].flags = UV_INHERIT_STREAM;
         options->stdio[i].data.stream = stream;
       } else {
-        int fd = static_cast<int>(
-            stdio->Get(String::NewSymbol("fd"))->IntegerValue());
-
+        Local<String> fd_key = FIXED_ONE_BYTE_STRING(node_isolate, "fd");
+        int fd = static_cast<int>(stdio->Get(fd_key)->IntegerValue());
         options->stdio[i].flags = UV_INHERIT_FD;
         options->stdio[i].data.fd = fd;
       }
@@ -121,9 +128,11 @@ class ProcessWrap : public HandleWrap {
   }
 
   static void Spawn(const FunctionCallbackInfo<Value>& args) {
-    HandleScope scope(node_isolate);
+    Environment* env = Environment::GetCurrent(args.GetIsolate());
+    HandleScope handle_scope(args.GetIsolate());
 
-    UNWRAP(ProcessWrap)
+    ProcessWrap* wrap;
+    NODE_UNWRAP(args.This(), ProcessWrap, wrap);
 
     Local<Object> js_options = args[0]->ToObject();
 
@@ -133,7 +142,8 @@ class ProcessWrap : public HandleWrap {
     options.exit_cb = OnExit;
 
     // options.uid
-    Local<Value> uid_v = js_options->Get(String::NewSymbol("uid"));
+    Local<Value> uid_v =
+        js_options->Get(FIXED_ONE_BYTE_STRING(node_isolate, "uid"));
     if (uid_v->IsInt32()) {
       int32_t uid = uid_v->Int32Value();
       if (uid & ~((uv_uid_t) ~0)) {
@@ -146,7 +156,8 @@ class ProcessWrap : public HandleWrap {
     }
 
     // options.gid
-    Local<Value> gid_v = js_options->Get(String::NewSymbol("gid"));
+    Local<Value> gid_v =
+        js_options->Get(FIXED_ONE_BYTE_STRING(node_isolate, "gid"));
     if (gid_v->IsInt32()) {
       int32_t gid = gid_v->Int32Value();
       if (gid & ~((uv_gid_t) ~0)) {
@@ -158,10 +169,11 @@ class ProcessWrap : public HandleWrap {
       return ThrowTypeError("options.gid should be a number");
     }
 
-    // TODO is this possible to do without mallocing ?
+    // TODO(bnoordhuis) is this possible to do without mallocing ?
 
     // options.file
-    Local<Value> file_v = js_options->Get(String::NewSymbol("file"));
+    Local<Value> file_v =
+        js_options->Get(FIXED_ONE_BYTE_STRING(node_isolate, "file"));
     String::Utf8Value file(file_v->IsString() ? file_v : Local<Value>());
     if (file.length() > 0) {
       options.file = *file;
@@ -170,7 +182,8 @@ class ProcessWrap : public HandleWrap {
     }
 
     // options.args
-    Local<Value> argv_v = js_options->Get(String::NewSymbol("args"));
+    Local<Value> argv_v =
+        js_options->Get(FIXED_ONE_BYTE_STRING(node_isolate, "args"));
     if (!argv_v.IsEmpty() && argv_v->IsArray()) {
       Local<Array> js_argv = Local<Array>::Cast(argv_v);
       int argc = js_argv->Length();
@@ -184,18 +197,20 @@ class ProcessWrap : public HandleWrap {
     }
 
     // options.cwd
-    Local<Value> cwd_v = js_options->Get(String::NewSymbol("cwd"));
+    Local<Value> cwd_v =
+        js_options->Get(FIXED_ONE_BYTE_STRING(node_isolate, "cwd"));
     String::Utf8Value cwd(cwd_v->IsString() ? cwd_v : Local<Value>());
     if (cwd.length() > 0) {
       options.cwd = *cwd;
     }
 
     // options.env
-    Local<Value> env_v = js_options->Get(String::NewSymbol("envPairs"));
+    Local<Value> env_v =
+        js_options->Get(FIXED_ONE_BYTE_STRING(node_isolate, "envPairs"));
     if (!env_v.IsEmpty() && env_v->IsArray()) {
       Local<Array> env = Local<Array>::Cast(env_v);
       int envc = env->Length();
-      options.env = new char*[envc + 1]; // Heap allocated to detect errors.
+      options.env = new char*[envc + 1];  // Heap allocated to detect errors.
       for (int i = 0; i < envc; i++) {
         String::Utf8Value pair(env->Get(i));
         options.env[i] = strdup(*pair);
@@ -204,24 +219,27 @@ class ProcessWrap : public HandleWrap {
     }
 
     // options.stdio
-    ParseStdioOptions(js_options, &options);
+    ParseStdioOptions(env, js_options, &options);
 
     // options.windows_verbatim_arguments
-    if (js_options->Get(String::NewSymbol("windowsVerbatimArguments"))->
-          IsTrue()) {
+    Local<String> windows_verbatim_arguments_key =
+        FIXED_ONE_BYTE_STRING(node_isolate, "windowsVerbatimArguments");
+    if (js_options->Get(windows_verbatim_arguments_key)->IsTrue()) {
       options.flags |= UV_PROCESS_WINDOWS_VERBATIM_ARGUMENTS;
     }
 
-    //options.detached
-    if (js_options->Get(String::NewSymbol("detached"))->IsTrue()) {
+    // options.detached
+    Local<String> detached_key =
+        FIXED_ONE_BYTE_STRING(node_isolate, "detached");
+    if (js_options->Get(detached_key)->IsTrue()) {
       options.flags |= UV_PROCESS_DETACHED;
     }
 
-    int err = uv_spawn(uv_default_loop(), &wrap->process_, options);
+    int err = uv_spawn(env->event_loop(), &wrap->process_, &options);
 
     if (err == 0) {
       assert(wrap->process_.data == wrap);
-      wrap->object()->Set(String::New("pid"),
+      wrap->object()->Set(FIXED_ONE_BYTE_STRING(node_isolate, "pid"),
                           Integer::New(wrap->process_.pid, node_isolate));
     }
 
@@ -242,30 +260,35 @@ class ProcessWrap : public HandleWrap {
 
   static void Kill(const FunctionCallbackInfo<Value>& args) {
     HandleScope scope(node_isolate);
-    UNWRAP(ProcessWrap)
+    ProcessWrap* wrap;
+    NODE_UNWRAP(args.This(), ProcessWrap, wrap);
 
     int signal = args[0]->Int32Value();
     int err = uv_process_kill(&wrap->process_, signal);
     args.GetReturnValue().Set(err);
   }
 
-  static void OnExit(uv_process_t* handle, int exit_status, int term_signal) {
-    HandleScope scope(node_isolate);
-
+  static void OnExit(uv_process_t* handle,
+                     int64_t exit_status,
+                     int term_signal) {
     ProcessWrap* wrap = static_cast<ProcessWrap*>(handle->data);
-    assert(wrap);
+    assert(wrap != NULL);
     assert(&wrap->process_ == handle);
 
+    Environment* env = wrap->env();
+    Context::Scope context_scope(env->context());
+    HandleScope handle_scope(env->isolate());
+
     Local<Value> argv[] = {
-      Integer::New(exit_status, node_isolate),
-      String::New(signo_string(term_signal))
+      Number::New(node_isolate, static_cast<double>(exit_status)),
+      OneByteString(node_isolate, signo_string(term_signal))
     };
 
-    if (onexit_sym.IsEmpty()) {
-      onexit_sym = String::New("onexit");
-    }
-
-    MakeCallback(wrap->object(), onexit_sym, ARRAY_SIZE(argv), argv);
+    MakeCallback(env,
+                 wrap->object(),
+                 env->onexit_string(),
+                 ARRAY_SIZE(argv),
+                 argv);
   }
 
   uv_process_t process_;
@@ -274,4 +297,4 @@ class ProcessWrap : public HandleWrap {
 
 }  // namespace node
 
-NODE_MODULE(node_process_wrap, node::ProcessWrap::Initialize)
+NODE_MODULE_CONTEXT_AWARE(node_process_wrap, node::ProcessWrap::Initialize)

@@ -294,20 +294,6 @@ function BIT_XOR(y) {
 }
 
 
-// ECMA-262, section 11.4.7, page 47.
-function UNARY_MINUS() {
-  var x = IS_NUMBER(this) ? this : %NonNumberToNumber(this);
-  return %NumberUnaryMinus(x);
-}
-
-
-// ECMA-262, section 11.4.8, page 48.
-function BIT_NOT() {
-  var x = IS_NUMBER(this) ? this : %NonNumberToNumber(this);
-  return %NumberNot(x);
-}
-
-
 // ECMA-262, section 11.7.1, page 51.
 function SHL(y) {
   var x = IS_NUMBER(this) ? this : %NonNumberToNumber(this);
@@ -587,7 +573,7 @@ function ToObject(x) {
   if (IS_NUMBER(x)) return new $Number(x);
   if (IS_BOOLEAN(x)) return new $Boolean(x);
   if (IS_NULL_OR_UNDEFINED(x) && !IS_UNDETECTABLE(x)) {
-    throw %MakeTypeError('null_to_object', []);
+    throw %MakeTypeError('undefined_or_null_to_object', []);
   }
   return x;
 }

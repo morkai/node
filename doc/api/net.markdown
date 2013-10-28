@@ -64,6 +64,8 @@ For TCP sockets, `options` argument should be an object which specifies:
 
   - `localAddress`: Local interface to bind to for network connections.
 
+  - `family` : Version of IP stack. Defaults to `4`.
+
 For UNIX domain sockets, `options` argument should be an object which specifies:
 
   - `path`: Path the client should connect to (Required).
@@ -116,7 +118,6 @@ The `connectListener` parameter will be added as an listener for the
 ## Class: net.Server
 
 This class is used to create a TCP or UNIX server.
-A server is a `net.Socket` that can listen for new incoming connections.
 
 ### server.listen(port, [host], [backlog], [callback])
 

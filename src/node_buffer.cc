@@ -22,11 +22,13 @@
 
 #include "node.h"
 #include "node_buffer.h"
+
+#include "env.h"
+#include "env-inl.h"
 #include "smalloc.h"
 #include "string_bytes.h"
-
-#include "v8.h"
 #include "v8-profiler.h"
+#include "v8.h"
 
 #include <assert.h>
 #include <string.h>
@@ -41,7 +43,9 @@
   Local<Object> obj = argT;                                                 \
   size_t obj_length = obj->GetIndexedPropertiesExternalArrayDataLength();   \
   char* obj_data = static_cast<char*>(                                      \
-    obj->GetIndexedPropertiesExternalArrayData());
+    obj->GetIndexedPropertiesExternalArrayData());                          \
+  if (obj_length > 0)                                                       \
+    assert(obj_data != NULL);
 
 #define SLICE_START_END(start_arg, end_arg, end_max)                        \
   size_t start;                                                             \
@@ -53,9 +57,10 @@
   size_t length = end - start;
 
 namespace node {
-
 namespace Buffer {
 
+using v8::ArrayBuffer;
+using v8::Context;
 using v8::Function;
 using v8::FunctionCallbackInfo;
 using v8::FunctionTemplate;
@@ -64,13 +69,9 @@ using v8::HandleScope;
 using v8::Local;
 using v8::Number;
 using v8::Object;
-using v8::Persistent;
 using v8::String;
 using v8::Uint32;
-using v8::Undefined;
 using v8::Value;
-
-static Persistent<Function> p_buffer_fn;
 
 
 bool HasInstance(Handle<Value> val) {
@@ -125,19 +126,21 @@ Local<Object> New(Handle<String> string, enum encoding enc) {
 }
 
 
+Local<Object> New(size_t length) {
+  Environment* env = Environment::GetCurrent(node_isolate);
+  return Buffer::New(env, length);
+}
+
+
 // TODO(trevnorris): these have a flaw by needing to call the Buffer inst then
 // Alloc. continue to look for a better architecture.
-Local<Object> New(size_t length) {
+Local<Object> New(Environment* env, size_t length) {
   HandleScope scope(node_isolate);
 
   assert(length <= kMaxLength);
 
-  Handle<Value> argv[2];
-  // this is safe b/c Undefined and length fits in an SMI, so there's no risk
-  // of GC reclaiming the values prematurely.
-  argv[0] = Undefined(node_isolate);
-  argv[1] = Uint32::New(length, node_isolate);
-  Local<Object> obj = NewInstance(p_buffer_fn, ARRAY_SIZE(argv), argv);
+  Local<Value> arg = Uint32::NewFromUnsigned(length, node_isolate);
+  Local<Object> obj = env->buffer_constructor_function()->NewInstance(1, &arg);
 
   // TODO(trevnorris): done like this to handle HasInstance since only checks
   // if external array data has been set, but would like to use a better
@@ -156,20 +159,22 @@ Local<Object> New(size_t length) {
 }
 
 
+Local<Object> New(const char* data, size_t length) {
+  Environment* env = Environment::GetCurrent(node_isolate);
+  return Buffer::New(env, data, length);
+}
+
+
 // TODO(trevnorris): for backwards compatibility this is left to copy the data,
 // but for consistency w/ the other should use data. And a copy version renamed
 // to something else.
-Local<Object> New(const char* data, size_t length) {
+Local<Object> New(Environment* env, const char* data, size_t length) {
   HandleScope scope(node_isolate);
 
   assert(length <= kMaxLength);
 
-  Handle<Value> argv[2];
-  // this is safe b/c Undefined and length fits in an SMI, so there's no risk
-  // of GC reclaiming the values prematurely.
-  argv[0] = Undefined(node_isolate);
-  argv[1] = Uint32::New(length, node_isolate);
-  Local<Object> obj = NewInstance(p_buffer_fn, ARRAY_SIZE(argv), argv);
+  Local<Value> arg = Uint32::NewFromUnsigned(length, node_isolate);
+  Local<Object> obj = env->buffer_constructor_function()->NewInstance(1, &arg);
 
   // TODO(trevnorris): done like this to handle HasInstance since only checks
   // if external array data has been set, but would like to use a better
@@ -194,16 +199,22 @@ Local<Object> New(char* data,
                   size_t length,
                   smalloc::FreeCallback callback,
                   void* hint) {
+  Environment* env = Environment::GetCurrent(node_isolate);
+  return Buffer::New(env, data, length, callback, hint);
+}
+
+
+Local<Object> New(Environment* env,
+                  char* data,
+                  size_t length,
+                  smalloc::FreeCallback callback,
+                  void* hint) {
   HandleScope scope(node_isolate);
 
   assert(length <= kMaxLength);
 
-  Handle<Value> argv[2];
-  // this is safe b/c Undefined and length fits in an SMI, so there's no risk
-  // of GC reclaiming the values prematurely.
-  argv[0] = Undefined(node_isolate);
-  argv[1] = Uint32::New(length, node_isolate);
-  Local<Object> obj = NewInstance(p_buffer_fn, ARRAY_SIZE(argv), argv);
+  Local<Value> arg = Uint32::NewFromUnsigned(length, node_isolate);
+  Local<Object> obj = env->buffer_constructor_function()->NewInstance(1, &arg);
 
   smalloc::Alloc(obj, data, length, callback, hint);
 
@@ -212,16 +223,18 @@ Local<Object> New(char* data,
 
 
 Local<Object> Use(char* data, uint32_t length) {
+  Environment* env = Environment::GetCurrent(node_isolate);
+  return Buffer::Use(env, data, length);
+}
+
+
+Local<Object> Use(Environment* env, char* data, uint32_t length) {
   HandleScope scope(node_isolate);
 
   assert(length <= kMaxLength);
 
-  Handle<Value> argv[2];
-  // this is safe b/c Undefined and length fits in an SMI, so there's no risk
-  // of GC reclaiming the values prematurely.
-  argv[0] = Undefined(node_isolate);
-  argv[1] = Uint32::New(length, node_isolate);
-  Local<Object> obj = NewInstance(p_buffer_fn, ARRAY_SIZE(argv), argv);
+  Local<Value> arg = Uint32::NewFromUnsigned(length, node_isolate);
+  Local<Object> obj = env->buffer_constructor_function()->NewInstance(1, &arg);
 
   smalloc::Alloc(obj, data, length);
 
@@ -458,7 +471,8 @@ void ReadFloatGeneric(const FunctionCallbackInfo<Value>& args) {
   const void* data = args.This()->GetIndexedPropertiesExternalArrayData();
   const char* ptr = static_cast<const char*>(data) + offset;
   memcpy(na.bytes, ptr, sizeof(na.bytes));
-  if (endianness != GetEndianness()) Swizzle(na.bytes, sizeof(na.bytes));
+  if (endianness != GetEndianness())
+    Swizzle(na.bytes, sizeof(na.bytes));
 
   args.GetReturnValue().Set(na.val);
 }
@@ -512,7 +526,8 @@ uint32_t WriteFloatGeneric(const FunctionCallbackInfo<Value>& args) {
   union NoAlias na = { val };
   void* data = args.This()->GetIndexedPropertiesExternalArrayData();
   char* ptr = static_cast<char*>(data) + offset;
-  if (endianness != GetEndianness()) Swizzle(na.bytes, sizeof(na.bytes));
+  if (endianness != GetEndianness())
+    Swizzle(na.bytes, sizeof(na.bytes));
   memcpy(ptr, na.bytes, sizeof(na.bytes));
   return offset + sizeof(na.bytes);
 }
@@ -538,6 +553,25 @@ void WriteDoubleBE(const FunctionCallbackInfo<Value>& args) {
 }
 
 
+void ToArrayBuffer(const FunctionCallbackInfo<Value>& args) {
+  HandleScope scope(node_isolate);
+
+  ARGS_THIS(args.This());
+  void* adata = malloc(obj_length);
+
+  if (adata == NULL) {
+    FatalError("node::Buffer::ToArrayBuffer("
+        "const FunctionCallbackInfo<v8::Value>&)",
+        "Out Of Memory");
+  }
+
+  memcpy(adata, obj_data, obj_length);
+
+  Local<ArrayBuffer> abuf = ArrayBuffer::New(adata, obj_length);
+  args.GetReturnValue().Set(abuf);
+}
+
+
 void ByteLength(const FunctionCallbackInfo<Value> &args) {
   HandleScope scope(node_isolate);
 
@@ -554,20 +588,19 @@ void ByteLength(const FunctionCallbackInfo<Value> &args) {
 
 // pass Buffer object to load prototype methods
 void SetupBufferJS(const FunctionCallbackInfo<Value>& args) {
-  HandleScope scope(node_isolate);
+  Environment* env = Environment::GetCurrent(args.GetIsolate());
+  HandleScope handle_scope(args.GetIsolate());
 
   assert(args[0]->IsFunction());
 
   Local<Function> bv = args[0].As<Function>();
-  p_buffer_fn.Reset(node_isolate, bv);
-  Local<Value> proto_v = bv->Get(String::New("prototype"));
+  env->set_buffer_constructor_function(bv);
+  Local<Value> proto_v =
+      bv->Get(FIXED_ONE_BYTE_STRING(node_isolate, "prototype"));
 
   assert(proto_v->IsObject());
 
   Local<Object> proto = proto_v.As<Object>();
-
-  bv->Set(String::New("byteLength"),
-          FunctionTemplate::New(ByteLength)->GetFunction());
 
   NODE_SET_METHOD(proto, "asciiSlice", AsciiSlice);
   NODE_SET_METHOD(proto, "base64Slice", Base64Slice);
@@ -593,24 +626,36 @@ void SetupBufferJS(const FunctionCallbackInfo<Value>& args) {
   NODE_SET_METHOD(proto, "writeFloatBE", WriteFloatBE);
   NODE_SET_METHOD(proto, "writeFloatLE", WriteFloatLE);
 
+  NODE_SET_METHOD(proto, "toArrayBuffer", ToArrayBuffer);
+
   NODE_SET_METHOD(proto, "copy", Copy);
   NODE_SET_METHOD(proto, "fill", Fill);
 
   // for backwards compatibility
-  proto->Set(String::New("offset"), Uint32::New(0, node_isolate), v8::ReadOnly);
+  proto->Set(FIXED_ONE_BYTE_STRING(node_isolate, "offset"),
+             Uint32::New(0, node_isolate),
+             v8::ReadOnly);
+
+  assert(args[1]->IsObject());
+
+  Local<Object> internal = args[1].As<Object>();
+
+  internal->Set(FIXED_ONE_BYTE_STRING(node_isolate, "byteLength"),
+                FunctionTemplate::New(ByteLength)->GetFunction());
 }
 
 
-void Initialize(Handle<Object> target) {
-  HandleScope scope(node_isolate);
-
-  target->Set(String::New("setupBufferJS"),
+void Initialize(Handle<Object> target,
+                Handle<Value> unused,
+                Handle<Context> context) {
+  Environment* env = Environment::GetCurrent(context);
+  HandleScope handle_scope(env->isolate());
+  target->Set(FIXED_ONE_BYTE_STRING(env->isolate(), "setupBufferJS"),
               FunctionTemplate::New(SetupBufferJS)->GetFunction());
 }
 
 
 }  // namespace Buffer
-
 }  // namespace node
 
-NODE_MODULE(node_buffer, node::Buffer::Initialize)
+NODE_MODULE_CONTEXT_AWARE(node_buffer, node::Buffer::Initialize)
